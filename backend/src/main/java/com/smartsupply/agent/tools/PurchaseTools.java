@@ -37,7 +37,7 @@ public class PurchaseTools {
         long start = System.currentTimeMillis();
         boolean ok = false;
         try {
-            security.requireAuthenticated("createPurchaseOrder");
+            security.requireSupplierWritePerm("createPurchaseOrder");
             if (supplierId == null || skuCode == null || skuCode.isBlank()) throw new IllegalArgumentException("supplierId 与 skuCode 不能为空");
             if (quantity <= 0 || quantity > 100000) throw new IllegalArgumentException("数量需在 1..100000");
             if (unitPrice < 0 || unitPrice > 1000000) throw new IllegalArgumentException("单价不合法");
@@ -74,6 +74,7 @@ public class PurchaseTools {
     @Tool(description = "查询供应商列表，按评分降序，用于选供应商")
     public java.util.List<Map<String, Object>> listSuppliers() {
         long start = System.currentTimeMillis();
+        security.requireRead("listSuppliers");
         try {
             List<Map<String, Object>> rows = jdbc.queryForList("SELECT id, name, rating, status FROM supplier ORDER BY rating DESC");
             observation.recordTool("listSuppliers", true, System.currentTimeMillis() - start);

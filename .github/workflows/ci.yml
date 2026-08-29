@@ -22,6 +22,12 @@ jobs:
       - name: Backend package
         working-directory: backend
         run: mvn -B package -DskipTests
+      - name: Upload jar artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-jar
+          path: backend/target/*.jar
+          retention-days: 3
 
   frontend:
     runs-on: ubuntu-latest
@@ -58,6 +64,10 @@ jobs:
     needs: [backend]
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: backend-jar
+          path: backend/target
       - run: docker compose -f docker-compose.prod.yml build
       - run: docker compose -f docker-compose.prod.yml config
 

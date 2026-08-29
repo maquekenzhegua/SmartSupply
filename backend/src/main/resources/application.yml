@@ -55,11 +55,6 @@ smartsupply:
     enabled: ${AGENT_PYTHON_ENABLED:false}
     base-url: ${AGENT_PYTHON_URL:http://127.0.0.1:8001}
     timeout-ms: 12000
-  minio:
-    endpoint: ${MINIO_ENDPOINT:http://localhost:9000}
-    access-key: ${MINIO_ACCESS_KEY:minioadmin}
-    secret-key: ${MINIO_SECRET_KEY:minioadmin123}
-    bucket: smartsupply
 
 knife4j:
   enable: true

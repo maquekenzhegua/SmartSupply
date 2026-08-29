@@ -106,6 +106,10 @@ public class ChatMemoryService {
     }
 
     public void append(String sessionId, String role, String content) {
+        append(sessionId, role, content, com.smartsupply.common.CurrentUser.username());
+    }
+
+    public void append(String sessionId, String role, String content, String username) {
         String k = key(sessionId);
         try {
             String json = redis.opsForValue().get(k);
@@ -133,7 +137,8 @@ public class ChatMemoryService {
             try { sessionDbId = jdbc.queryForObject("SELECT id FROM chat_session WHERE title=? LIMIT 1", Long.class, sessionId); } catch (Exception ignored) {}
             if (sessionDbId == null) {
                 try {
-                    jdbc.update("INSERT INTO chat_session(agent_type, title) VALUES (?,?)", "general", sessionId);
+                    Long userId = resolveUserId(username);
+                    jdbc.update("INSERT INTO chat_session(agent_type, title, user_id) VALUES (?,?,?)", "general", sessionId, userId);
                     sessionDbId = jdbc.queryForObject("SELECT id FROM chat_session WHERE title=? ORDER BY id DESC LIMIT 1", Long.class, sessionId);
                 } catch (Exception ex) {
                     log.debug("create chat_session failed: {}", ex.toString());
@@ -145,6 +150,29 @@ public class ChatMemoryService {
             }
         } catch (Exception e) {
             log.debug("DB append failed sessionId={}: {}", sessionId, e.toString());
+        }
+    }
+
+    /** 会话归属者用户名；user_id 为空（存量会话）或查不到用户时返回 null */
+    public String sessionOwner(String sessionId) {
+        try {
+            List<Map<String, Object>> rows = jdbc.queryForList(
+                    "SELECT u.username AS username FROM chat_session s LEFT JOIN sys_user u ON u.id=s.user_id " +
+                            "WHERE s.title=? ORDER BY s.id DESC LIMIT 1", sessionId);
+            if (rows.isEmpty()) return null;
+            Object uname = rows.get(0).get("username");
+            return uname == null ? null : String.valueOf(uname);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private Long resolveUserId(String username) {
+        if (username == null || username.isBlank() || "system".equals(username)) return null;
+        try {
+            return jdbc.queryForObject("SELECT id FROM sys_user WHERE username=?", Long.class, username);
+        } catch (Exception e) {
+            return null;
         }
     }
 

@@ -120,12 +120,20 @@ public class AgentController {
             if (m.getText() == null || m.getText().equals(systemPrompt)) continue;
             spec = spec.messages(m);
         }
-        String reply = spec.user(userContent)
-                .tools(inventoryTools, purchaseTools, contractTools, catalogTools)
-                .call().content();
+        com.smartsupply.agent.tools.ToolSecurity.beginToolTrace();
+        String reply;
+        List<String> usedTools;
+        try {
+            reply = spec.user(userContent)
+                    .tools(inventoryTools, purchaseTools, contractTools, catalogTools)
+                    .call().content();
+        } finally {
+            // 即使工具抛异常也要结束本次追踪，避免 ThreadLocal 泄漏到线程池复用的下一个请求
+            usedTools = com.smartsupply.agent.tools.ToolSecurity.endToolTrace();
+        }
         reply = enforceCitation(reply, ragContext);
-        memory.append(sessionId, "user", message);
-        memory.append(sessionId, "assistant", reply == null ? "" : reply);
+        memory.append(sessionId, "user", message, com.smartsupply.common.CurrentUser.username());
+        memory.append(sessionId, "assistant", reply == null ? "" : reply, com.smartsupply.common.CurrentUser.username());
         // 优先用模型 usage 回填 actual，否则用估算 estimated
         int promptTokens;
         int completionTokens;
@@ -145,7 +153,19 @@ public class AgentController {
         double cost = tokenEstimator.estimateCostUsd(promptTokens, completionTokens);
         observation.recordChat(agentType, "java-direct", System.currentTimeMillis() - start, promptTokens, completionTokens, cost, traceId, tokenSource);
         if (detail != null) observation.recordRag(detail.latencyMs(), detail.reranked());
-        return Result.ok(Map.of("reply", reply == null ? "" : reply, "agentType", agentType, "sessionId", sessionId, "mode", "java-direct", "promptVersion", promptVersion, "traceId", traceId == null ? "" : traceId, "flagged", flagged, "tokenSource", tokenSource, "promptTokens", promptTokens, "completionTokens", completionTokens));
+        Map<String, Object> data = new java.util.HashMap<>();
+        data.put("reply", reply == null ? "" : reply);
+        data.put("agentType", agentType);
+        data.put("sessionId", sessionId);
+        data.put("mode", "java-direct");
+        data.put("promptVersion", promptVersion);
+        data.put("traceId", traceId == null ? "" : traceId);
+        data.put("flagged", flagged);
+        data.put("tokenSource", tokenSource);
+        data.put("promptTokens", promptTokens);
+        data.put("completionTokens", completionTokens);
+        data.put("tools", usedTools);
+        return Result.ok(data);
     }
 
     @PostMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
@@ -175,6 +195,7 @@ public class AgentController {
                 StringBuilder acc = new StringBuilder();
                 AtomicBoolean firstToken = new AtomicBoolean(true);
                 AtomicLong ttfbMs = new AtomicLong(-1);
+                com.smartsupply.agent.tools.ToolSecurity.beginToolTrace();
                 try {
                     var stream = spec.user(finalUserContent)
                             .tools(inventoryTools, purchaseTools, contractTools, catalogTools)
@@ -205,8 +226,8 @@ public class AgentController {
                                         reply = fallback;
                                         for (String ch : reply.split("")) emitter.send(SseEmitter.event().data(String.valueOf(ch)).name("token"));
                                     }
-                                    memory.append(sessionId, "user", message);
-                                    memory.append(sessionId, "assistant", reply);
+                                    memory.append(sessionId, "user", message, com.smartsupply.common.CurrentUser.username());
+                                    memory.append(sessionId, "assistant", reply, com.smartsupply.common.CurrentUser.username());
                                     long totalMs = System.currentTimeMillis() - streamStart;
                                     long pt2 = MuseSparkChatModel.consumeLastPromptTokens();
                                     long ct2 = MuseSparkChatModel.consumeLastCompletionTokens();
@@ -220,6 +241,7 @@ public class AgentController {
                                     done.put("ttfbMs", ttfbMs.get());
                                     done.put("totalMs", totalMs);
                                     done.put("tokenSource", srcFinal);
+                                    done.put("tools", com.smartsupply.agent.tools.ToolSecurity.endToolTrace());
                                     emitter.send(SseEmitter.event().data(new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(done)).name("done"));
                                     emitter.complete();
                                 } catch (Exception e) { emitter.completeWithError(e); }
@@ -229,8 +251,8 @@ public class AgentController {
                 } catch (Exception ex) {
                     String reply = enforceCitation(spec.user(finalUserContent).tools(inventoryTools, purchaseTools, contractTools, catalogTools).call().content(), finalRagContext);
                     String text = reply == null ? "" : reply;
-                    memory.append(sessionId, "user", message);
-                    memory.append(sessionId, "assistant", text);
+                    memory.append(sessionId, "user", message, com.smartsupply.common.CurrentUser.username());
+                    memory.append(sessionId, "assistant", text, com.smartsupply.common.CurrentUser.username());
                     for (String ch : text.split("")) { emitter.send(SseEmitter.event().data(String.valueOf(ch)).name("token")); }
                     long totalMs = System.currentTimeMillis() - streamStart;
                     observation.recordChat(agentType, "stream-fallback", totalMs, tokenEstimator.estimate(systemPrompt + finalUserContent), tokenEstimator.estimate(text), tokenEstimator.estimateCostUsd(tokenEstimator.estimate(text), tokenEstimator.estimate(text)), capturedTrace == null ? "stream" : capturedTrace, "estimated");
@@ -271,8 +293,14 @@ public class AgentController {
 
     @GetMapping("/memory/{sessionId}")
     public Result<Map<String, Object>> memoryView(@PathVariable String sessionId) {
+        // 会话隔离：session 归属他人时拒绝读取（user_id 为空的存量会话兼容放行）
+        String viewer = com.smartsupply.common.CurrentUser.username();
+        String owner = memory.sessionOwner(sessionId);
+        if (owner != null && viewer != null && !"system".equals(viewer) && !viewer.equals(owner)) {
+            return Result.fail(403, "无权查看他人会话");
+        }
         ChatMemoryService.MemorySnapshot snap = memory.snapshot(sessionId, prompts.contentFor("general"));
-        return Result.ok(Map.of("sessionId", sessionId, "size", snap.messages().size(), "summary", snap.summary() == null ? "" : snap.summary(), "messages", snap.messages()));
+        return Result.ok(Map.of("sessionId", sessionId, "owner", owner == null ? "" : owner, "size", snap.messages().size(), "summary", snap.summary() == null ? "" : snap.summary(), "messages", snap.messages()));
     }
 
     @GetMapping("/metrics/summary")

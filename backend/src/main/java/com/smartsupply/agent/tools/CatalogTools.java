@@ -14,12 +14,14 @@ public class CatalogTools {
 
     private final JdbcTemplate jdbc;
     private final ObservationService observation;
-    public CatalogTools(JdbcTemplate jdbc, ObservationService observation) { this.jdbc = jdbc; this.observation = observation; }
+    private final ToolSecurity security;
+    public CatalogTools(JdbcTemplate jdbc, ObservationService observation, ToolSecurity security) { this.jdbc = jdbc; this.observation = observation; this.security = security; }
 
     @Tool(description = "搜索商品与SKU，返回 product_name/sku_code/spec/sale_price，关键词走参数化 ILIKE")
     public List<Map<String, Object>> searchCatalog(
             @ToolParam(description = "关键词，如 T恤/箱包/白色") String keyword) {
         long start = System.currentTimeMillis();
+        security.requireRead("searchCatalog");
         try {
             String q = "%" + (keyword == null ? "" : keyword.trim()) + "%";
             List<Map<String, Object>> rows = jdbc.queryForList("""

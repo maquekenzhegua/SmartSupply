@@ -21,14 +21,15 @@ def load_golden():
     return rows
 
 def pseudo_recall(question: str, contexts_pool: list[str]) -> str:
-    """模拟 RagService.recall：优先用 must_contain/关键词在 contexts_pool 中召回，否则兜底"""
-    # 直接命中：任一 context 与 question 有 2 字以上重叠即召回
-    def overlap(a: str, b: str) -> bool:
-        for i in range(len(a) - 1):
-            if a[i:i+2] in b:
-                return True
-        return False
-    hits = [c for c in contexts_pool if overlap(c, question) or overlap(question, c)]
+    """模拟 RagService.recall：按与 question 的 bigram 重合度排序取 top-2（对应真实链路的向量召回+重排），
+    无命中时按类别关键词兜底。"""
+    def overlap_count(a: str, b: str) -> int:
+        return sum(1 for i in range(len(a) - 1) if a[i:i+2] in b)
+    scored = sorted(
+        ((overlap_count(question, c) + overlap_count(c, question), c) for c in contexts_pool),
+        key=lambda x: -x[0],
+    )
+    hits = [c for s, c in scored if s > 0]
     if not hits:
         # 回退：按类别关键词兜底
         if any(k in question for k in ["无限", "违约金", "交付", "争议", "风控"]):
@@ -185,7 +186,7 @@ def _real_answer_fn():
     )
 
     def _responses_answer(question: str, context: str) -> str:
-        # 与 MuseSparkChatModel.buildInput 同构的拼接格式
+        # 与 MuseSparkChatModel.buildInput 同构的拼接格式（muse 专属 /responses 协议）
         input_text = f"System: {system}\n\nUser: <knowledge>\n{context}\n</knowledge>\n\n<user_query>\n{question}\n</user_query>"
         payload = {
             "model": config.AI_MODEL,
@@ -224,7 +225,8 @@ def _real_answer_fn():
         )
         return resp.choices[0].message.content or ""
 
-    if "opencode" in base:
+    # 与 Java 侧 AiConfig 路由一致：muse 模型走 /responses，其余（如 mimo-v2.5）走标准 chat/completions
+    if "opencode" in base and "muse" in (config.AI_MODEL or ""):
         return _responses_answer
     return _chat_answer
 

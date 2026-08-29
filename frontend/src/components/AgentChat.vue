@@ -3,7 +3,13 @@
     <div class="messages" ref="msgRef">
       <div v-for="(m, i) in messages" :key="i" :class="['msg', m.role]">
         <div class="role">{{ m.role === 'user' ? '你' : (m.agentType || 'Agent') }}</div>
-        <div class="bubble">{{ m.content }}</div>
+        <div v-if="m.role === 'assistant' && m.tools && m.tools.length" class="tool-chips">
+          <el-tag v-for="(tool, ti) in m.tools" :key="ti" type="warning" effect="plain" size="small" style="margin-right:4px">
+            🔧 {{ tool.split('(')[0] }}
+          </el-tag>
+        </div>
+        <div v-if="m.role === 'assistant'" class="bubble md" v-html="renderMd(m.content)"></div>
+        <div v-else class="bubble">{{ m.content }}</div>
       </div>
       <div v-if="loading" class="msg assistant"><div class="bubble">思考中…<span v-if="streamText">{{ streamText.slice(0, 40) }}…</span></div></div>
     </div>
@@ -29,8 +35,15 @@
 
 <script setup lang="ts">
 import { ref, nextTick, onMounted, computed, watch } from 'vue'
+import { marked } from 'marked'
 import { api } from '@/api'
 import request from '@/utils/request'
+
+marked.setOptions({ breaks: true, gfm: true })
+// 先转义 HTML 再解析 markdown：保留 markdown 语法的同时中和模型输出里的原始 HTML 标签
+function renderMd(src: string): string {
+  return marked.parse((src || '').replace(/</g, '&lt;'), { async: false }) as string
+}
 
 const props = withDefaults(defineProps<{ defaultAgent?: string; initialQuery?: string }>(), {
   defaultAgent: 'general',
@@ -45,7 +58,7 @@ const deepEnabled = ref(false)
 const streamText = ref('')
 const sessionId = ref('sess-' + Math.random().toString(36).slice(2, 8))
 const toolList = ref<{ name: string; desc: string }[]>([])
-const messages = ref<{ role: 'user' | 'assistant'; content: string; agentType?: string }[]>([
+const messages = ref<{ role: 'user' | 'assistant'; content: string; agentType?: string; tools?: string[] }[]>([
   { role: 'assistant', content: '你好，我是 SmartSupply Agent，可查库存、创建采购单、搜合同/商品，支持多轮记忆。试试：“哪些SKU低于安全库存？”或“帮我查一下T恤的SKU”。', agentType: 'Agent' },
 ])
 const msgRef = ref<HTMLElement>()
@@ -87,8 +100,8 @@ async function send() {
     if (useStream.value) {
       await sendStream(text)
     } else {
-      const res: { reply: string } = await api.agentChat({ message: text, agentType: agentType.value, sessionId: sessionId.value, useDeep: String(useDeep.value) } as unknown as Record<string, string>)
-      messages.value.push({ role: 'assistant', content: res.reply, agentType: agentType.value })
+      const res = await api.agentChat({ message: text, agentType: agentType.value, sessionId: sessionId.value, useDeep: String(useDeep.value) } as unknown as Record<string, string>) as unknown as Record<string, unknown>
+      messages.value.push({ role: 'assistant', content: String(res.reply || ''), agentType: agentType.value, tools: Array.isArray(res.tools) ? (res.tools as string[]) : undefined })
     }
   } catch {
     messages.value.push({ role: 'assistant', content: '调用失败，请检查后端是否启动。' })
@@ -116,14 +129,35 @@ async function sendStream(text: string) {
   let full = ''
   const idx = messages.value.length
   messages.value.push({ role: 'assistant', content: '', agentType: agentType.value })
+  let sseBuf = ''
+  let sseEvent = 'message'
+  const handleLine = (line: string) => {
+    if (line.startsWith('event:')) { sseEvent = line.slice(6).trim(); return }
+    if (!line.startsWith('data:')) return
+    const payload = line.slice(5).replace(/^ /, '')
+    if (sseEvent === 'done') {
+      try {
+        const info = JSON.parse(payload)
+        if (Array.isArray(info.tools) && info.tools.length) messages.value[idx].tools = info.tools
+      } catch { /* done 事件解析失败不影响正文 */ }
+      return
+    }
+    if (payload === '[DONE]') return
+    full += payload
+    messages.value[idx].content = full
+    streamText.value = full
+  }
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
-    const chunk = decoder.decode(value, { stream: true })
-    // SseEmitter 默认以事件流格式返回，逐字拼接
-    full += chunk.replace(/^data:/gm, '').trim()
-    messages.value[idx].content = full
-    streamText.value = full
+    sseBuf += decoder.decode(value, { stream: true })
+    const lines = sseBuf.split('\n')
+    sseBuf = lines.pop() ?? ''
+    for (const ln of lines) {
+      const line = ln.replace(/\r$/, '')
+      if (line === '') { sseEvent = 'message'; continue }  // 空行 = 事件边界
+      handleLine(line)
+    }
     await nextTick()
     if (msgRef.value) msgRef.value.scrollTop = msgRef.value.scrollHeight
   }
@@ -148,6 +182,13 @@ defineExpose({ send, messages, agentType, input })
 .bubble { max-width: 82%; padding: 10px 14px; border-radius: 12px; white-space: pre-wrap; word-break: break-word; line-height: 1.6; }
 .msg.user .bubble { background: #409eff; color: #fff; }
 .msg.assistant .bubble { background: #f2f3f5; color: #303133; }
+.msg.assistant .bubble.md :deep(p) { margin: 0 0 6px; }
+.msg.assistant .bubble.md :deep(pre) { background: #282c34; color: #abb2bf; padding: 8px 10px; border-radius: 8px; overflow-x: auto; font-size: 12px; }
+.msg.assistant .bubble.md :deep(code) { font-family: Consolas, Menlo, monospace; }
+.msg.assistant .bubble.md :deep(ul), .msg.assistant .bubble.md :deep(ol) { margin: 4px 0; padding-left: 20px; }
+.msg.assistant .bubble.md :deep(table) { border-collapse: collapse; margin: 6px 0; }
+.msg.assistant .bubble.md :deep(th), .msg.assistant .bubble.md :deep(td) { border: 1px solid #dcdfe6; padding: 4px 8px; }
+.tool-chips { max-width: 82%; display: flex; flex-wrap: wrap; gap: 2px; }
 .input-row { display: flex; gap: 8px; padding: 12px; border-top: 1px solid #ebeef5; align-items: center; }
 .tool-bar { padding: 6px 12px; border-top: 1px solid #f2f3f5; display:flex; align-items:center; flex-wrap:wrap; gap:4px }
 </style>

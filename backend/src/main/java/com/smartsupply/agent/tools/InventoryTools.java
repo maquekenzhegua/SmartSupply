@@ -19,8 +19,9 @@ public class InventoryTools {
     private static final Pattern SKU_PATTERN = Pattern.compile("^[A-Z0-9-]{3,32}$");
     private final JdbcTemplate jdbc;
     private final ObservationService observation;
+    private final ToolSecurity security;
 
-    public InventoryTools(JdbcTemplate jdbc, ObservationService observation) { this.jdbc = jdbc; this.observation = observation; }
+    public InventoryTools(JdbcTemplate jdbc, ObservationService observation, ToolSecurity security) { this.jdbc = jdbc; this.observation = observation; this.security = security; }
 
     @Tool(description = "查询指定 SKU 的库存与安全库存，返回 quantity / safety_stock / 是否低于安全库存")
     public Map<String, Object> getInventory(
@@ -28,6 +29,7 @@ public class InventoryTools {
         long start = System.currentTimeMillis();
         boolean ok = false;
         try {
+            security.requireRead("getInventory");
             if (skuCode == null || skuCode.isBlank()) throw new IllegalArgumentException("skuCode 不能为空");
             String code = skuCode.trim().toUpperCase();
             if (!SKU_PATTERN.matcher(code).matches()) throw new IllegalArgumentException("SKU 格式不合法");
@@ -51,6 +53,7 @@ public class InventoryTools {
     @Tool(description = "查询所有低于安全库存的 SKU 列表，按缺口降序")
     public List<Map<String, Object>> listLowStock() {
         long start = System.currentTimeMillis();
+        security.requireRead("listLowStock");
         try {
             List<Map<String, Object>> rows = jdbc.queryForList("""
                     SELECT s.sku_code, s.spec, w.name as warehouse, i.quantity, i.safety_stock

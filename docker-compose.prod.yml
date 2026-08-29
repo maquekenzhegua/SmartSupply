@@ -20,14 +20,6 @@ services:
     ports: ["6379:6379"]
     volumes: [redisdata:/data]
     healthcheck: { test: ["CMD","redis-cli","ping"], interval: 10s, retries: 5 }
-  minio:
-    image: minio/minio:latest
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
-    ports: ["9000:9000","9001:9001"]
-    command: server /data --console-address ":9001"
-    volumes: [miniodata:/data]
   backend:
     build: ./backend
     depends_on:
@@ -55,4 +47,4 @@ services:
       AI_MODEL: ${AI_MODEL:-gpt-4o-mini}
     ports: ["8001:8001"]
     depends_on: [backend]
-volumes: { pgdata: {}, redisdata: {}, miniodata: {} }
+volumes: { pgdata: {}, redisdata: {},  }

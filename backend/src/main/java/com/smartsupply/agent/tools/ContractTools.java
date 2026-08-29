@@ -14,12 +14,14 @@ public class ContractTools {
 
     private final JdbcTemplate jdbc;
     private final ObservationService observation;
-    public ContractTools(JdbcTemplate jdbc, ObservationService observation) { this.jdbc = jdbc; this.observation = observation; }
+    private final ToolSecurity security;
+    public ContractTools(JdbcTemplate jdbc, ObservationService observation, ToolSecurity security) { this.jdbc = jdbc; this.observation = observation; this.security = security; }
 
     @Tool(description = "按关键词搜索合同，返回 id/title/status/amount，关键词走参数化 ILIKE")
     public List<Map<String, Object>> searchContracts(
             @ToolParam(description = "关键词，如 服装/采购/2026") String keyword) {
         long start = System.currentTimeMillis();
+        security.requireRead("searchContracts");
         try {
             String q = "%" + (keyword == null ? "" : keyword.trim()) + "%";
             List<Map<String, Object>> rows = jdbc.queryForList("SELECT id, title, status, amount FROM contract WHERE title ILIKE ? ORDER BY id DESC LIMIT 10", q);
@@ -37,6 +39,7 @@ public class ContractTools {
         long start = System.currentTimeMillis();
         boolean ok = false;
         try {
+            security.requireRead("getContractRisk");
             if (contractId == null || contractId <= 0) throw new IllegalArgumentException("contractId 不合法");
             List<Map<String, Object>> rows = jdbc.queryForList(
                     "SELECT risk_level, summary, suggestion FROM contract_risk_report WHERE contract_id=? ORDER BY id DESC LIMIT 1", contractId);
