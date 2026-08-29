@@ -172,20 +172,48 @@ def test_fastapi_recall_not_empty_for_golden_questions():
 # ---------------------------------------------------------------------------
 
 def _real_answer_fn():
-    import openai
+    """真实 LLM 答案函数。opencode 网关（如 muse-spark）只支持 /responses 协议，
+    走 httpx 直连；其余 OpenAI 兼容端点走 chat.completions。"""
+    import httpx
     from app import config
 
-    client = openai.OpenAI(
-        api_key=config.OPENAI_API_KEY or config.DASHSCOPE_API_KEY,
-        base_url=config.OPENAI_BASE_URL,
-        timeout=60,
-    )
+    base = (config.OPENAI_BASE_URL or "").rstrip("/")
+    api_key = config.OPENAI_API_KEY or config.DASHSCOPE_API_KEY
     system = (
         "你是供应链合同风控助手。仅依据给定的 <knowledge> 上下文作答，"
         "答案需引用上下文中的关键数据；依据不足时回答“依据不足”。"
     )
 
-    def answer(question: str, context: str) -> str:
+    def _responses_answer(question: str, context: str) -> str:
+        # 与 MuseSparkChatModel.buildInput 同构的拼接格式
+        input_text = f"System: {system}\n\nUser: <knowledge>\n{context}\n</knowledge>\n\n<user_query>\n{question}\n</user_query>"
+        payload = {
+            "model": config.AI_MODEL,
+            "input": input_text,
+            "max_output_tokens": 2500,
+            "reasoning": {"effort": "low"},
+        }
+        r = httpx.post(
+            f"{base}/responses",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=120,
+        )
+        r.raise_for_status()
+        data = r.json()
+        for node in data.get("output", []):
+            if node.get("type") == "message" and node.get("role") == "assistant":
+                for c in node.get("content", []):
+                    if c.get("text"):
+                        return c["text"].strip()
+        if data.get("output_text"):
+            return data["output_text"].strip()
+        raise RuntimeError(f"responses 无文本输出: status={data.get('status')}")
+
+    def _chat_answer(question: str, context: str) -> str:
+        import openai
+
+        client = openai.OpenAI(api_key=api_key, base_url=base, timeout=120)
         resp = client.chat.completions.create(
             model=config.AI_MODEL,
             messages=[
@@ -196,7 +224,9 @@ def _real_answer_fn():
         )
         return resp.choices[0].message.content or ""
 
-    return answer
+    if "opencode" in base:
+        return _responses_answer
+    return _chat_answer
 
 
 def _run_eval(answer_fn):
