@@ -15,7 +15,7 @@ public class VectorStoreConfig {
     @Bean
     @ConditionalOnBean(EmbeddingModel.class)
     VectorStore pgVectorStore(JdbcTemplate jdbcTemplate, EmbeddingModel embeddingModel,
-                              @Value("${spring.ai.vectorstore.pgvector.dimensions:1536}") int dims) {
+                              @Value("${spring.ai.vectorstore.pgvector.dimensions:1024}") int dims) {
         return PgVectorStore.builder(jdbcTemplate, embeddingModel)
                 .dimensions(dims)
                 .distanceType(PgVectorStore.PgDistanceType.COSINE_DISTANCE)

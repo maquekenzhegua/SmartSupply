@@ -88,8 +88,8 @@ docker compose -f docker-compose.prod.yml --env-file .env up -d --build
 
 - **离线演示**（默认 `AI_MOCK=true`）：`MockChatModel` + `MockEmbeddingModel`，Tool/RAG/SSE 流式链路全部可演示，不依赖任何 Key。
 - **真实 Chat 模型**（`AI_MOCK=false` + `OPENAI_API_KEY`）：任一 OpenAI 兼容端点自动走标准 `OpenAiChatModel`（原生 Tool Calling + 流式）——OpenAI / DeepSeek / 通义千问 compatible-mode / 智谱 / vLLM 均可，改 `OPENAI_BASE_URL` + `AI_MODEL` 即切换；muse 网关自动走 `/responses` 协议的 `MuseSparkChatModel`（含真流式 stream() 实现）。
-- **真实 Embedding**（默认随 Chat 开关自动判断）：非 muse 网关且有 Key 时走 `/embeddings` 语义向量（默认 `text-embedding-3-small`，1536 维与 pgvector 列一致；换模型需同步 `VECTOR_DIMENSIONS` 与迁移列宽，DeepSeek 无 embeddings 接口）。无 Key 时回退 `MockEmbeddingModel`（哈希伪向量，检索无语义，仅保证链路可演示），可用 `EMBEDDING_MOCK` 强制。
-- 评测：`agent-python/tests/test_golden_eval.py` 20 条 golden 数据集；离线跑规则指标（CI），设 `EVAL_REAL_LLM=1` + Key 后同数据集跑真实 LLM 评测（本地）。
+- **真实 Embedding**（与 Chat 解耦，`EMBEDDING_*` 独立配置）：默认对接**本地 Ollama**（免费、离线、中文友好）——`ollama pull qwen3-embedding:0.6b`（1024 维）后设 `EMBEDDING_BASE_URL=http://localhost:11434/v1`、`EMBEDDING_API_KEY=ollama`、`EMBEDDING_MODEL=qwen3-embedding:0.6b`、`VECTOR_DIMENSIONS=1024` 即可；中文语义区分度实测 gap≈0.47（相关对 0.67 vs 无关对 0.20）。也可指向 OpenAI text-embedding-3-small（1536 维，需同步 `VECTOR_DIMENSIONS=1536` 与建表列宽）；DeepSeek/opencode 网关无 embeddings 接口。无任何端点时回退 `MockEmbeddingModel`（哈希伪向量，检索无语义，仅保证链路可演示），可用 `EMBEDDING_MOCK` 强制。
+- 评测：`agent-python/tests/test_golden_eval.py` 20 条 golden 数据集；离线跑规则指标（CI），设 `EVAL_REAL_LLM=1` + Key 后同数据集跑真实 LLM 评测（本地，已实测：hit 0.700 / recall 0.700 / faithfulness 0.685）。真实模型门控测试：`MuseSparkChatModelRealTest`（Chat call+流式，71 delta chunks）、`OllamaEmbeddingRealTest`（本地向量维度+中文语义区分度）。
 
 ## 前端双通道
 

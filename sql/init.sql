@@ -123,13 +123,13 @@ CREATE TABLE IF NOT EXISTS knowledge_doc (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- pgvector 向量表（1536 维适配 OpenAI/兼容模型；用 768 亦可，建表时按 embedding 模型调整）
+-- pgvector 向量表（默认 1024 维适配本地 Ollama qwen3-embedding:0.6b / bge-m3；换 OpenAI text-embedding-3-small 时改 1536）
 CREATE TABLE IF NOT EXISTS knowledge_chunk (
     id              BIGSERIAL PRIMARY KEY,
     doc_id          BIGINT       REFERENCES knowledge_doc(id) ON DELETE CASCADE,
     chunk_index     INTEGER      NOT NULL DEFAULT 0,
     content         TEXT         NOT NULL,
-    embedding       vector(1536),
+    embedding       vector(1024),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_knowledge_chunk_embedding ON knowledge_chunk USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);

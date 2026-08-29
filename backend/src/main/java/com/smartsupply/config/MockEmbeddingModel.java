@@ -12,10 +12,23 @@ import java.util.List;
 import java.util.Random;
 
 /**
- * Mock Embedding：无真实 Embedding Key 时，用确定性伪向量保证 RAG 链路可演示。
- * 维度 1536 与 pgvector 表一致，余弦相似度可计算。
+ * Mock Embedding：无真实 Embedding 端点时，用确定性伪向量保证 RAG 链路可演示。
+ * 维度跟随 spring.ai.vectorstore.pgvector.dimensions（默认 1024），保证与 pgvector/H2 表及 VectorStore 一致；
+ * 余弦相似度可计算，但伪向量不具备语义，检索质量不代表真实效果。
  */
 public class MockEmbeddingModel implements EmbeddingModel {
+
+    public static final int DEFAULT_DIMENSIONS = 1024;
+
+    private final int dims;
+
+    public MockEmbeddingModel() {
+        this(DEFAULT_DIMENSIONS);
+    }
+
+    public MockEmbeddingModel(int dims) {
+        this.dims = dims;
+    }
 
     @Override
     public EmbeddingResponse call(EmbeddingRequest request) {
@@ -27,7 +40,7 @@ public class MockEmbeddingModel implements EmbeddingModel {
         }
         List<Embedding> embeddings = new ArrayList<>();
         for (int idx = 0; idx < texts.size(); idx++) {
-            float[] vec = pseudoVector(texts.get(idx), 1536);
+            float[] vec = pseudoVector(texts.get(idx), dims);
             embeddings.add(new Embedding(vec, idx));
         }
         return new EmbeddingResponse(embeddings, new EmbeddingResponseMetadata());
@@ -35,7 +48,7 @@ public class MockEmbeddingModel implements EmbeddingModel {
 
     @Override
     public float[] embed(Document document) {
-        return pseudoVector(document.getText(), 1536);
+        return pseudoVector(document.getText(), dims);
     }
 
     private static float[] pseudoVector(String text, int dims) {

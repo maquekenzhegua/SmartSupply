@@ -27,17 +27,25 @@ spring:
           temperature: 0.3
       embedding:
         options:
-          model: text-embedding-3-small
+          model: ${EMBEDDING_MODEL:text-embedding-3-small}
     vectorstore:
       pgvector:
         index-type: HNSW
         distance-type: COSINE_DISTANCE
-        dimensions: ${VECTOR_DIMENSIONS:1536}
+        dimensions: ${VECTOR_DIMENSIONS:1024}
 
 smartsupply:
   ai:
     mock: ${AI_MOCK:true}
     # 通义千问 / DeepSeek 兼容：切 base-url 与 model 即可
+    # Embedding 端点与 Chat 解耦（可独立指向本地 Ollama 等 OpenAI 兼容 /v1/embeddings 服务）：
+    #   EMBEDDING_BASE_URL=http://localhost:11434/v1  EMBEDDING_API_KEY=ollama  EMBEDDING_MODEL=qwen3-embedding:0.6b
+    #   本地 Ollama 免费、离线、中文友好（qwen3-embedding:0.6b / bge-m3 均为 1024 维，VECTOR_DIMENSIONS=1024）
+    # 不设 EMBEDDING_* 时回退 spring.ai.openai.*；muse/opencode 网关无 /embeddings，会被自动拒绝
+    embedding:
+      base-url: ${EMBEDDING_BASE_URL:${spring.ai.openai.base-url:}}
+      api-key: ${EMBEDDING_API_KEY:${spring.ai.openai.api-key:}}
+    embedding-mock: ${EMBEDDING_MOCK:false}
   rag:
     rerank-mode: ${RAG_RERANK_MODE:auto}
   jwt:

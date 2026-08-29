@@ -5,7 +5,7 @@
 > - Java 侧：`MuseSparkChatModelRealTest`（EVAL_REAL_LLM 门控）2/2 通过——同步 call 返回 313 字合规风控分析；**真流式 stream 从真实网关收到 71 个 delta chunk**，端到端 SSE 链路验证完毕。
 > - Python 侧：`test_real_llm_golden_eval`（EVAL_REAL_LLM 门控）通过，20 条 golden 真实模型口径：**关键词命中 0.700 / 上下文召回 0.700 / faithfulness 代理 0.685**（对比离线 mock 自证口径 0.875/0.700/0.865——命中下降属预期，mock 答案与 must_contain 同源）。
 > - 失分项分析（面试口径）：7 条 0 分项集中在“问系统自身实现细节”（如 RAG 分段 800、记忆 20 轮）与“要求模型报 Java 工具函数名”（createPurchaseOrder/searchContracts）——这些信息均不在提供给模型的 `<knowledge>` 上下文中，模型**拒绝编造而非幻觉输出**，与“依据不足直说”的反幻觉设计一致；改进路径是把 golden 集拆分为领域问答与系统元信息两类，或在评测上下文中注入工具清单。
-> - opencode 网关无 `/embeddings` 端点，Embedding 仍为 Mock（检索无语义），接入真实 embedding 需另配 OpenAI/智谱等 Key。
+> - opencode 网关无 `/embeddings` 端点。**Embedding 已切本地 Ollama**：`qwen3-embedding:0.6b`（1024 维，免费离线），生产同路径 `OllamaEmbeddingRealTest` 验证——维度与 VECTOR_DIMENSIONS 一致，中文语义区分度 gap≈0.47（相关对 0.672 vs 无关对 0.203；此前实测 snowflake-arctic-embed 中文 gap 仅 0.01，不合格弃用）。全项目维度统一 1024（Mock 向量跟随配置、H2/PG 建表、VectorStoreConfig）。**存量库迁移**：`DROP TABLE IF EXISTS vector_store;`（旧 1536 维表）后重启自动按 1024 重建，再重新上传知识文档入库。
 > 复现（Key 从环境变量注入，勿写死在仓库）：
 > - `EVAL_REAL_LLM=1 OPENAI_API_KEY=... OPENAI_BASE_URL=https://opencode.ai/zen/go/v1 AI_MODEL=muse-spark-1.2-contributor mvn -B test -Dtest=MuseSparkChatModelRealTest`（backend/）
 > - `EVAL_REAL_LLM=1 OPENAI_API_KEY=... OPENAI_BASE_URL=... AI_MODEL=... python -m pytest tests/test_golden_eval.py -m real_llm -s -v`（agent-python/）

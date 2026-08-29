@@ -19,7 +19,7 @@ spring:
       pgvector:
         index-type: HNSW
         distance-type: COSINE_DISTANCE
-        dimensions: ${VECTOR_DIMENSIONS:1536}
+        dimensions: ${VECTOR_DIMENSIONS:1024}
 
 smartsupply:
   ai:
