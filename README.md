@@ -1,0 +1,118 @@
+# SmartSupply — Agent 赋能的智能供应链协同平台（C 路：企业底座 + 原创 Agent）
+
+> 大厂主流：**Java 业务编排 + Python LangGraph 深度推理 + Vue3 前端**。无 Key 可跑，有 Key 一键切真实模型。
+
+## 架构
+
+```
+Vue3 (frontend, Vite proxy /api -> 8080)
+  │ REST / SSE  POST /api/agent/chat  POST /api/agent/chat/stream
+  ▼
+Spring Boot 3.5 + Spring AI  Java 编排层 (backend)
+  ├─ 业务域：supplier / product / sku / warehouse / inventory / purchase / contract / bi / stats
+  ├─ Agent：ChatClient + @Tool(7) + RAG(pgvector 1536 HNSW) + ChatMemory(Redis) + SSE
+  ├─ 安全：Spring Security + JWT + 全局异常 + 限流(Redis) + SQL 参数化
+  └─ 委托：useDeep/agentType=deep 时经 PythonSidecarService -> LangGraph 边车
+         ▲ 回调 Tool API（inventory/supplier 等只读）   │
+         │                                              ▼
+       Python 边车 (agent-python, 复用 D:\conda_envs\ai-backend)
+         FastAPI + LangGraph(规划->工具->反思) + Mock/真实 LLM(OpenAI 兼容)
+基础设施：PostgreSQL + pgvector + Redis + MinIO（docker-compose）
+```
+
+**开关：** 默认纯 Java 可跑；深度推理需同时满足：
+
+1. 启动边车：`D:\conda_envs\ai-backend\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8001 --reload`（或 `agent-python/start.bat`）
+2. Java 设 `AGENT_PYTHON_ENABLED=true`（`application.yml` / 环境变量 / `docker-compose.prod.yml`），前端“深度推理”开关才可用。
+
+## 目录
+
+- `backend/` Java 17 + Spring Boot 3.5.14 + Spring AI 1.0.0 + JdbcTemplate + pgvector
+- `frontend/` Vue 3.4 + TS 5.5 + Vite 5 + Element Plus + ECharts（已 code-split，`npm run build` 产出 `dist/`）
+- `agent-python/` FastAPI + LangGraph 边车（`D:\conda_envs\ai-backend` 已装 langchain/langgraph/fastapi/openai/httpx）
+- `sql/init.sql` 演示数据（supplier/warehouse/product/sku/inventory/contract/knowledge_doc）
+- `docker-compose.yml` 开发一键起（postgres/redis/minio）
+- `docker-compose.prod.yml` 生产一键起（+ backend + agent-python，`SPRING_PROFILES_ACTIVE=prod`）
+- `docs/` 架构与 3 分钟面试剧本
+
+## 一键启动
+
+### 你的环境（VMware 直连，已配置 192.168.10.100，Windows 不再起任何数据库）
+
+```bash
+# 1) VMware 里（与你现有 MySQL/Redis 共存，新增 PG 向量库）
+docker run -d --name smartsupply-postgres -p 5432:5432 -v pgdata:/var/lib/postgresql/data \
+  -e POSTGRES_DB=smartsupply -e POSTGRES_USER=dev -e POSTGRES_PASSWORD='change-me-strong-password' \
+  pgvector/pgvector:pg16
+# 初始化（把 D:/Agent/sql/init.sql 拷到虚拟机后执行）
+PGPASSWORD='change-me-strong-password' psql -h 127.0.0.1 -U dev -d smartsupply -f /tmp/init.sql  # /tmp/init.sql 为 scp 后的路径
+# 确认 Redis 密码与端口放行（你已设 change-me-strong-password）
+redis-cli -h 127.0.0.1 -a 'change-me-strong-password' ping  # 无用户名，仅密码；应返回 PONG
+# 按需放行防火墙
+sudo firewall-cmd --permanent --add-port=5432/tcp --add-port=6379/tcp --add-port=9000/tcp && sudo firewall-cmd --reload
+
+# 2) Windows（直连 VMware，不执行 docker-compose.yml）
+cd D:/Agent/backend
+set SPRING_PROFILES_ACTIVE=vmware
+mvn spring-boot:run
+# 或一次性覆盖：set SPRING_DATA_REDIS_PASSWORD=change-me-strong-password && mvn spring-boot:run -Dspring-boot.run.profiles=vmware
+
+# 可选深度推理
+D:\conda_envs\ai-backend\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8001 --reload
+# 前端另起终端
+cd D:/Agent/frontend && npm install && npm run dev
+# 前端 http://localhost:3000  账号 admin / admin123
+# 后端 http://localhost:8080  文档 /doc.html  健康 /actuator/health
+# 边车 http://127.0.0.1:8001  健康 /health  推理 POST /api/reason
+# 自检：Windows 侧执行
+# powershell -Command "Test-NetConnection 192.168.10.100 -Port 5432,6379"
+# curl http://192.168.10.100:5432  应建连；redis-cli -h 192.168.10.100 -a 'change-me-strong-password' ping
+```
+
+### 面试官演示（Windows 本地 docker-compose 一键起，仅备用）
+
+```bash
+docker-compose up -d          # 起 pgvector + redis + minio（你本地不需要，仅给面试官）
+cd D:/Agent/backend && mvn spring-boot:run  # 默认连 localhost
+```
+
+### 生产（VMware/云服务器同理，用 .env 外置）
+
+```bash
+copy .env.example .env  # 复制后填入你的真实凭据（.env 已被 .gitignore 排除，切勿提交明文）
+docker compose -f docker-compose.prod.yml --env-file .env up -d --build
+# 前端：npm run build 产出 dist/，由 Nginx/对象存储托管
+```
+
+## 模型接入（AiConfig 装配规则）
+
+- **离线演示**（默认 `AI_MOCK=true`）：`MockChatModel` + `MockEmbeddingModel`，Tool/RAG/SSE 流式链路全部可演示，不依赖任何 Key。
+- **真实 Chat 模型**（`AI_MOCK=false` + `OPENAI_API_KEY`）：任一 OpenAI 兼容端点自动走标准 `OpenAiChatModel`（原生 Tool Calling + 流式）——OpenAI / DeepSeek / 通义千问 compatible-mode / 智谱 / vLLM 均可，改 `OPENAI_BASE_URL` + `AI_MODEL` 即切换；muse 网关自动走 `/responses` 协议的 `MuseSparkChatModel`（含真流式 stream() 实现）。
+- **真实 Embedding**（默认随 Chat 开关自动判断）：非 muse 网关且有 Key 时走 `/embeddings` 语义向量（默认 `text-embedding-3-small`，1536 维与 pgvector 列一致；换模型需同步 `VECTOR_DIMENSIONS` 与迁移列宽，DeepSeek 无 embeddings 接口）。无 Key 时回退 `MockEmbeddingModel`（哈希伪向量，检索无语义，仅保证链路可演示），可用 `EMBEDDING_MOCK` 强制。
+- 评测：`agent-python/tests/test_golden_eval.py` 20 条 golden 数据集；离线跑规则指标（CI），设 `EVAL_REAL_LLM=1` + Key 后同数据集跑真实 LLM 评测（本地）。
+
+## 前端双通道
+
+- **流式**：`POST /api/agent/chat/stream` SseEmitter 打字机
+- **深度推理**：`useDeep=true` 且 `GET /api/agent/mode` 返回 `pythonSidecarEnabled=true` 时走边车，否则回落 Java 直连；未就绪时开关自动禁用
+
+## 企业级加固（本次 20% 补齐）
+
+- `application-prod.yml` + `logback-spring.xml`：prod 日志 INFO + 滚动文件 + 健康检查
+- 全局异常：`GlobalExceptionHandler` 区分 400/403/429/500，prod 隐藏堆栈
+- 安全：JWT 校验 + `SecurityConfig` 放行白名单 + `RateLimit`/`RateLimitInterceptor`（Redis 计数，429 限流）+ 全量 SQL 参数化（`?` 占位，`ILIKE ?`）
+- 限流示例：`POST /api/agent/chat` 30/min、`POST /api/bi/analyze` 20/min；前端 `request.ts` 对 401 自动清 token 跳登录，429/403 友好提示
+- 部署：`backend/Dockerfile`（JRE 17）、`agent-python/Dockerfile`（python:3.11-slim）、`docker-compose.prod.yml` 健康依赖与环境变量外置、`.env.example`
+
+## 验证
+
+```bash
+cd D:/Agent/backend && D:/tools/Maven/bin/mvn package -DskipTests  # 已产出 81M fat jar
+cd D:/Agent/frontend && npm run build                                # 已产出 dist/ 2247 modules
+```
+
+> 约束：Maven 仓库 `D:\tools\maven-repository`、npm 缓存 `D:\npm-cache` / 全局 `D:\tools\npm-global`、Python `D:\conda_envs\ai-backend`，均已落盘 D 盘未侵占 C 盘。
+
+## 演示剧本
+
+见 `docs/interview-script.md`（合同风控 RAG / 补货可执行 / NL2SQL 安全三段），`docs/architecture.md` 为分层与时序。

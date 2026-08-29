@@ -1,0 +1,54 @@
+server:
+  port: 8080
+spring:
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://postgres:5432/smartsupply}
+    username: ${SPRING_DATASOURCE_USERNAME:smartsupply}
+    password: ${SPRING_DATASOURCE_PASSWORD:smartsupply123}
+  data:
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:redis}
+      port: 6379
+  ai:
+    openai:
+      api-key: ${OPENAI_API_KEY:}
+      base-url: ${OPENAI_BASE_URL:https://api.openai.com}
+      chat:
+        options:
+          model: ${AI_MODEL:gpt-4o-mini}
+          temperature: 0.2
+      embedding:
+        options:
+          model: text-embedding-3-small
+    vectorstore:
+      pgvector:
+        index-type: HNSW
+        distance-type: COSINE_DISTANCE
+        dimensions: 1536
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: when_authorized
+smartsupply:
+  ai:
+    mock: ${AI_MOCK:false}
+  jwt:
+    secret: ${JWT_SECRET:}
+    expire-hours: 12
+  agent-python:
+    enabled: ${AGENT_PYTHON_ENABLED:false}
+    base-url: ${AGENT_PYTHON_URL:http://agent-python:8001}
+    timeout-ms: 12000
+  minio:
+    endpoint: ${MINIO_ENDPOINT:http://minio:9000}
+    access-key: ${MINIO_ACCESS_KEY:minioadmin}
+    secret-key: ${MINIO_SECRET_KEY:minioadmin123}
+    bucket: smartsupply
+logging:
+  level:
+    com.smartsupply: INFO
+    org.springframework.ai: WARN

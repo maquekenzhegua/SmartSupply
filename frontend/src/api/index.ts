@@ -1,0 +1,44 @@
+import request from '@/utils/request'
+
+export const api = {
+  stats: () => request.get('/bi/stats').then(r => r.data.data || r.data),
+  statsSummary: () => request.get('/stats/summary').then(r => r.data.data || r.data),
+  categoryStock: () => request.get('/stats/category-stock').then(r => r.data.data || r.data),
+  inventory: (params: Record<string, unknown>) => request.get('/inventory', { params }).then(r => r.data.data || r.data),
+  inventoryFlows: (params: Record<string, unknown>) => request.get('/inventory/flows', { params }).then(r => r.data.data || r.data),
+  adjustInventory: (body: Record<string, unknown>) => request.post('/inventory/adjust', body).then(r => r.data.data || r.data),
+  suppliers: (params: Record<string, unknown>) => request.get('/suppliers', { params }).then(r => r.data.data || r.data),
+  supplierDetail: (id: number) => request.get(`/suppliers-extra/${id}`).then(r => r.data.data || r.data),
+  supplierOptions: () => request.get('/suppliers-extra/options').then(r => r.data.data || r.data),
+  createSupplier: (body: Record<string, unknown>) => request.post('/suppliers', body).then(r => r.data.data || r.data),
+  updateSupplier: (id: number, body: Record<string, unknown>) => request.put(`/suppliers-extra/${id}`, body).then(r => r.data.data || r.data),
+  deleteSupplier: (id: number) => request.delete(`/suppliers-extra/${id}`).then(r => r.data.data || r.data),
+  products: (params: Record<string, unknown>) => request.get('/products', { params }).then(r => r.data.data || r.data),
+  productDetail: (id: number) => request.get(`/products/${id}`).then(r => r.data.data || r.data),
+  createProduct: (body: Record<string, unknown>) => request.post('/products', body).then(r => r.data.data || r.data),
+  updateProduct: (id: number, body: Record<string, unknown>) => request.put(`/products/${id}`, body).then(r => r.data.data || r.data),
+  deleteProduct: (id: number) => request.delete(`/products/${id}`).then(r => r.data.data || r.data),
+  skus: (params: Record<string, unknown>) => request.get('/skus', { params }).then(r => r.data.data || r.data),
+  createSku: (body: Record<string, unknown>) => request.post('/skus', body).then(r => r.data.data || r.data),
+  updateSku: (id: number, body: Record<string, unknown>) => request.put(`/skus/${id}`, body).then(r => r.data.data || r.data),
+  deleteSku: (id: number) => request.delete(`/skus/${id}`).then(r => r.data.data || r.data),
+  warehouses: (params: Record<string, unknown>) => request.get('/warehouses', { params }).then(r => r.data.data || r.data),
+  warehouseOptions: () => request.get('/warehouses/options').then(r => r.data.data || r.data),
+  createWarehouse: (body: Record<string, unknown>) => request.post('/warehouses', body).then(r => r.data.data || r.data),
+  updateWarehouse: (id: number, body: Record<string, unknown>) => request.put(`/warehouses/${id}`, body).then(r => r.data.data || r.data),
+  deleteWarehouse: (id: number) => request.delete(`/warehouses/${id}`).then(r => r.data.data || r.data),
+  contracts: (params: Record<string, unknown>) => request.get('/contracts', { params }).then(r => r.data.data || r.data),
+  purchaseOrders: (params: Record<string, unknown>) => request.get('/purchase-orders', { params }).then(r => r.data.data || r.data),
+  poDetail: (id: number) => request.get(`/purchase-orders-extra/${id}`).then(r => r.data.data || r.data),
+  createPo: (body: Record<string, unknown>) => request.post('/purchase-orders-extra', body).then(r => r.data.data || r.data),
+  updatePoStatus: (id: number, status: string) => request.put(`/purchase-orders-extra/${id}/status`, { status }).then(r => r.data.data || r.data),
+  deletePo: (id: number) => request.delete(`/purchase-orders-extra/${id}`).then(r => r.data.data || r.data),
+  agentChat: (body: Record<string, string>) => request.post('/agent/chat', body).then(r => r.data.data || r.data),
+  biAnalyze: (question: string) => request.post('/bi/analyze', { question }).then(r => r.data.data || r.data),
+  uploadContract: (file: File, supplierId?: number) => {
+    const fd = new FormData(); fd.append('file', file)
+    if (supplierId) fd.append('supplierId', String(supplierId))
+    return request.post('/contracts/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } }).then(r => r.data.data || r.data)
+  },
+  riskReport: (id: number) => request.get(`/contracts/${id}/risk-report`).then(r => r.data.data || r.data),
+}

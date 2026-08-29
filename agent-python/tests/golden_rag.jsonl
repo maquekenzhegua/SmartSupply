@@ -1,0 +1,20 @@
+{"question": "合同中出现乙方承担一切连带责任有什么风险", "ground_truth": "属于高风险的无限连带责任条款，建议改为在乙方过错范围内承担有限责任", "must_contain": ["无限连带责任", "有限责任"], "contexts": ["公司合同风控规范（节选）：1. 禁止无限连带责任条款；2. 违约金不得超过合同额30%；3. 交付时间必须明确到日，模糊表述视为风险；4. 争议解决地应为我方所在地。", "历史风险案例：无限责任条款 案例：2024年与XX厂合同因“乙方承担一切连带责任”导致纠纷，教训：必须改为“在乙方过错范围内承担有限责任”。"]}
+{"question": "违约金约定为合同额的50%是否合规", "ground_truth": "不合规，违约金不得超过合同额30%", "must_contain": ["30%"], "contexts": ["公司合同风控规范（节选）：1. 禁止无限连带责任条款；2. 违约金不得超过合同额30%；3. 交付时间必须明确到日，模糊表述视为风险；4. 争议解决地应为我方所在地。"]}
+{"question": "合同约定尽快交付是否算明确", "ground_truth": "不算明确，交付时间必须明确到日，尽快交付属于模糊表述视为风险", "must_contain": ["明确到日", "风险"], "contexts": ["公司合同风控规范（节选）：1. 禁止无限连带责任条款；2. 违约金不得超过合同额30%；3. 交付时间必须明确到日，模糊表述视为风险；4. 争议解决地应为我方所在地。"]}
+{"question": "争议解决地约定为乙方所在地是否合适", "ground_truth": "不合适，应为我方所在地", "must_contain": ["我方所在地"], "contexts": ["公司合同风控规范（节选）：1. 禁止无限连带责任条款；2. 违约金不得超过合同额30%；3. 交付时间必须明确到日，模糊表述视为风险；4. 争议解决地应为我方所在地。"]}
+{"question": "如何修改无限连带责任条款", "ground_truth": "改为在乙方过错范围内承担有限责任", "must_contain": ["有限责任", "过错"], "contexts": ["历史风险案例：无限责任条款 案例：2024年与XX厂合同因“乙方承担一切连带责任”导致纠纷，教训：必须改为“在乙方过错范围内承担有限责任”。"]}
+{"question": "哪些 SKU 低于安全库存需要补货", "ground_truth": "SKU-T001-WH-M 当前120低于安全库存200，SKU-B001-BE 当前45低于100，需要补货", "must_contain": ["SKU-T001", "安全库存"], "contexts": ["库存表：SKU-T001-WH-M 华南中心仓 120/200 低于安全库存；SKU-B001-BE 华东中心仓 45/100 低于安全库存"]}
+{"question": "深圳创优服装厂的评分是多少", "ground_truth": "4.80分，供应商中评分最高", "must_contain": ["4.8"], "contexts": ["供应商表：深圳创优服装厂 4.80；东莞精工纺织 4.60；广州尚品供应链 4.30"]}
+{"question": "帆布托特包的SKU是什么", "ground_truth": "SKU-B001-BE 米色/均码", "must_contain": ["SKU-B001"], "contexts": ["SKU表：帆布托特包 SKU-B001-BE 米色/均码 成本18 售价39"]}
+{"question": "华南中心仓在什么位置", "ground_truth": "深圳宝安", "must_contain": ["深圳"], "contexts": ["仓库表：华南中心仓 深圳宝安；华东中心仓 上海嘉定"]}
+{"question": "2026年度T恤采购框架合同的金额是多少", "ground_truth": "280000元，状态REVIEWING", "must_contain": ["280000"], "contexts": ["合同表：2026年度T恤采购框架合同 金额280000 状态REVIEWING"]}
+{"question": "公司合同风控规范有哪些", "ground_truth": "禁止无限连带责任、违约金不超30%、交付时间明确到日、争议解决地为我方所在地", "must_contain": ["无限连带责任", "30%"], "contexts": ["公司合同风控规范（节选）：1. 禁止无限连带责任条款；2. 违约金不得超过合同额30%；3. 交付时间必须明确到日，模糊表述视为风险；4. 争议解决地应为我方所在地。"]}
+{"question": "采购单创建后默认是什么状态", "ground_truth": "DRAFT状态，需人工审核后转APPROVED", "must_contain": ["DRAFT"], "contexts": ["采购流程：采购单默认DRAFT，需人工确认才转APPROVED，防止Agent误下单"]}
+{"question": "库存充足的SKU有哪些", "ground_truth": "SKU-T001-BK-L 800/150 充足，SKU-C001-SV-500 300/100 充足", "must_contain": ["库存充足"], "contexts": ["库存表：SKU-T001-BK-L 华南中心仓 800/150 充足；SKU-C001-SV-500 华南中心仓 300/100 充足"]}
+{"question": "如何创建采购单", "ground_truth": "调用createPurchaseOrder需指定供应商ID、SKU编码、数量和单价", "must_contain": ["createPurchaseOrder"], "contexts": ["Tool定义：createPurchaseOrder 需指定供应商ID、SKU编码、数量和单价，返回采购单号"]}
+{"question": "查询合同应使用哪个工具", "ground_truth": "searchContracts按关键词搜索合同，getContractRisk查询风控报告", "must_contain": ["searchContracts"], "contexts": ["Tool定义：searchContracts 按关键词搜合同；getContractRisk 查风控报告"]}
+{"question": "BI分析支持哪些图表类型", "ground_truth": "支持pie/bar/line，由ECharts渲染", "must_contain": ["pie"], "contexts": ["BI流程：NL转SQL后结果转ECharts，chartType为pie/bar/line之一，前端用vue-echarts渲染"]}
+{"question": "RAG召回的分段策略是什么", "ground_truth": "800字窗口100字重叠，中文句号友好切分", "must_contain": ["800"], "contexts": ["TextSplitter：800字窗口100字重叠，尽量在句号处切断，适配中文长文"]}
+{"question": "Agent记忆保留多少轮", "ground_truth": "最近20轮进上下文，最多存40条，7天过期", "must_contain": ["20"], "contexts": ["ChatMemoryService：近期20轮进上下文，限制40条，7天过期，Redis不可用时不阻断"]}
+{"question": "限流策略是多少", "ground_truth": "Agent对话30/min，BI分析20/min，基于Redis计数", "must_contain": ["30"], "contexts": ["限流：POST /api/agent/chat 30/min、POST /api/bi/analyze 20/min，Redis计数超限返回429"]}
+{"question": "向量库维度是多少", "ground_truth": "1536维，适配OpenAI text-embedding-3-small，HNSW索引余弦距离", "must_contain": ["1536"], "contexts": ["向量库：pgvector 1536维 HNSW COSINE_DISTANCE，兼容text-embedding-3-small，Mock用伪向量演示"]}

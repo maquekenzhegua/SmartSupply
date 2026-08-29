@@ -1,0 +1,79 @@
+server:
+  port: 8080
+
+spring:
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/smartsupply}
+    username: ${SPRING_DATASOURCE_USERNAME:smartsupply}
+    password: ${SPRING_DATASOURCE_PASSWORD:smartsupply123}
+    driver-class-name: org.postgresql.Driver
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+  data:
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:localhost}
+      port: ${SPRING_DATA_REDIS_PORT:6379}
+      password: ${SPRING_DATA_REDIS_PASSWORD:}
+  ai:
+    openai:
+      # 填你的 Key；留空则走 mock
+      api-key: ${OPENAI_API_KEY:}
+      base-url: ${OPENAI_BASE_URL:https://api.openai.com}
+      chat:
+        options:
+          model: ${AI_MODEL:gpt-4o-mini}
+          temperature: 0.3
+      embedding:
+        options:
+          model: text-embedding-3-small
+    vectorstore:
+      pgvector:
+        index-type: HNSW
+        distance-type: COSINE_DISTANCE
+        dimensions: ${VECTOR_DIMENSIONS:1536}
+
+smartsupply:
+  ai:
+    mock: ${AI_MOCK:true}
+    # 通义千问 / DeepSeek 兼容：切 base-url 与 model 即可
+  rag:
+    rerank-mode: ${RAG_RERANK_MODE:auto}
+  jwt:
+    secret: ${JWT_SECRET:smartsupply-dev-secret-key-please-change-in-prod-32chars!}
+    expire-hours: 12
+  agent-python:
+    enabled: ${AGENT_PYTHON_ENABLED:false}
+    base-url: ${AGENT_PYTHON_URL:http://127.0.0.1:8001}
+    timeout-ms: 12000
+  minio:
+    endpoint: ${MINIO_ENDPOINT:http://localhost:9000}
+    access-key: ${MINIO_ACCESS_KEY:minioadmin}
+    secret-key: ${MINIO_SECRET_KEY:minioadmin123}
+    bucket: smartsupply
+
+knife4j:
+  enable: true
+  setting:
+    language: zh_cn
+
+logging:
+  level:
+    com.smartsupply: DEBUG
+    org.springframework.ai: INFO
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: when_authorized
+  health:
+    redis:
+      enabled: ${MANAGEMENT_HEALTH_REDIS_ENABLED:true}
+  metrics:
+    tags:
+      application: smartsupply

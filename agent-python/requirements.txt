@@ -1,0 +1,12 @@
+# 与 D:\conda_envs\ai-backend 实测版本对齐；Docker 构建按此精确复现
+fastapi==0.139.2
+uvicorn==0.51.0
+pydantic==2.13.4
+httpx==0.28.1
+openai==2.50.0
+langchain==1.3.14
+langchain-core==1.6.0
+langgraph==1.2.10
+dashscope==1.26.4
+# 本地/CI 测试用
+pytest==9.1.1

@@ -1,0 +1,12 @@
+target/
+node_modules/
+dist/
+.idea/
+*.iml
+.env
+.env.local
+logs/
+.pytest_cache/
+__pycache__/
+*.bak
+*.log
