@@ -45,7 +45,10 @@ public class RagService {
         return recallWithDetail(query).context();
     }
 
-    public record RecallDetail(String context, int vectorHits, int keywordHits, int reranked, long latencyMs) {}
+    public record Citation(String docId, String title, String snippet, double score) {}
+    public record RecallDetail(String context, int vectorHits, int keywordHits, int reranked, long latencyMs, List<Citation> citations) {
+        public RecallDetail(String context, int vectorHits, int keywordHits, int reranked, long latencyMs) { this(context, vectorHits, keywordHits, reranked, latencyMs, List.of()); }
+    }
 
     public RecallDetail recallWithDetail(String query) {
         long start = System.currentTimeMillis();
@@ -71,10 +74,18 @@ public class RagService {
             }
         }
         String vectorContext = "";
+        List<Citation> citations = new java.util.ArrayList<>();
         if (vectorDocs != null && !vectorDocs.isEmpty()) {
             Timer.builder("rag.recall.latency").tag("mode", "vector").register(meterRegistry)
                     .record(System.currentTimeMillis() - start, java.util.concurrent.TimeUnit.MILLISECONDS);
             vectorContext = vectorDocs.stream().map(Document::getText).collect(Collectors.joining("\n---\n"));
+            for (Document d : vectorDocs) {
+                String did = String.valueOf(d.getMetadata().getOrDefault("docId",""));
+                String title = String.valueOf(d.getMetadata().getOrDefault("title",""));
+                Double score = d.getScore() != null ? d.getScore() : 0.0;
+                String snippet = d.getText() == null ? "" : d.getText().substring(0, Math.min(120, d.getText().length()));
+                citations.add(new Citation(did, title, snippet, score));
+            }
         }
 
         // 关键词兜底：参数化 ILIKE，防注入；补齐到 3 条以内，避免空召回
@@ -87,11 +98,14 @@ public class RagService {
             if (keywordRows.isEmpty()) keywordRows = jdbc.queryForList("SELECT title, content FROM knowledge_doc LIMIT 2");
             String kwContext = keywordRows.stream().map(r -> r.get("title") + "：\n" + r.get("content"))
                     .collect(Collectors.joining("\n---\n"));
+            for (Map<String,Object> r : keywordRows) {
+                citations.add(new Citation(String.valueOf(r.get("title")), String.valueOf(r.get("title")), String.valueOf(r.get("content")).substring(0, Math.min(120, String.valueOf(r.get("content")).length())), 0.0));
+            }
             long latency = System.currentTimeMillis() - start;
             Timer.builder("rag.recall.latency").tag("mode", "keyword").register(meterRegistry)
                     .record(latency, java.util.concurrent.TimeUnit.MILLISECONDS);
             String ctx = vectorContext.isBlank() ? kwContext : vectorContext + "\n---\n" + kwContext;
-            return new RecallDetail(ctx, vectorHits, keywordRows.size(), vectorDocs == null ? 0 : vectorDocs.size(), latency);
+            return new RecallDetail(ctx, vectorHits, keywordRows.size(), vectorDocs == null ? 0 : vectorDocs.size(), latency, citations);
         }
         // 向量已命中时，额外补 1 条关键词结果以提升覆盖（混合召回）
         if (!q.isEmpty()) {
@@ -107,7 +121,7 @@ public class RagService {
             } catch (Exception ignored) {}
         }
         long latency = System.currentTimeMillis() - start;
-        return new RecallDetail(vectorContext, vectorHits, 0, vectorDocs.size(), latency);
+        return new RecallDetail(vectorContext, vectorHits, 0, vectorDocs.size(), latency, citations);
     }
 
     /** 分段入库：knowledge_doc 存原文，knowledge_chunk/vectorStore 存向量 */

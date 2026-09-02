@@ -10,6 +10,16 @@
         </div>
         <div v-if="m.role === 'assistant'" class="bubble md" v-html="renderMd(m.content)"></div>
         <div v-else class="bubble">{{ m.content }}</div>
+        <div v-if="m.role === 'assistant' && m.citations && m.citations.length" class="citations">
+          <div style="font-size:12px; color:#909399; margin-top:4px">引用</div>
+          <div v-for="c in m.citations" :key="c.idx" style="font-size:12px; background:#fafafa; padding:4px 8px; border-radius:6px; margin:4px 0">
+            <b>[{{ c.idx }}] {{ c.title }}</b> <span style="color:#909399">score={{ Number(c.score).toFixed(3) }}</span><br/>{{ c.snippet }}
+          </div>
+        </div>
+        <div v-if="m.role === 'assistant'" style="display:flex; gap:6px; margin-top:4px">
+          <el-button size="small" @click="feedback(i, 1)">👍</el-button>
+          <el-button size="small" @click="feedback(i, -1)">👎</el-button>
+        </div>
       </div>
       <div v-if="loading" class="msg assistant"><div class="bubble">思考中…<span v-if="streamText">{{ streamText.slice(0, 40) }}…</span></div></div>
     </div>
@@ -58,7 +68,7 @@ const deepEnabled = ref(false)
 const streamText = ref('')
 const sessionId = ref('sess-' + Math.random().toString(36).slice(2, 8))
 const toolList = ref<{ name: string; desc: string }[]>([])
-const messages = ref<{ role: 'user' | 'assistant'; content: string; agentType?: string; tools?: string[] }[]>([
+const messages = ref<{ role: 'user' | 'assistant'; content: string; agentType?: string; tools?: string[]; citations?: any[]; runId?: number }[]>([
   { role: 'assistant', content: '你好，我是 SmartSupply Agent，可查库存、创建采购单、搜合同/商品，支持多轮记忆。试试：“哪些SKU低于安全库存？”或“帮我查一下T恤的SKU”。', agentType: 'Agent' },
 ])
 const msgRef = ref<HTMLElement>()
@@ -101,7 +111,7 @@ async function send() {
       await sendStream(text)
     } else {
       const res = await api.agentChat({ message: text, agentType: agentType.value, sessionId: sessionId.value, useDeep: String(useDeep.value) } as unknown as Record<string, string>) as unknown as Record<string, unknown>
-      messages.value.push({ role: 'assistant', content: String(res.reply || ''), agentType: agentType.value, tools: Array.isArray(res.tools) ? (res.tools as string[]) : undefined })
+      messages.value.push({ role: 'assistant', content: String(res.reply || ''), agentType: agentType.value, tools: Array.isArray(res.tools) ? (res.tools as string[]) : undefined, citations: Array.isArray((res as any).citations) ? (res as any).citations : undefined, runId: (res as any).runId })
     }
   } catch {
     messages.value.push({ role: 'assistant', content: '调用失败，请检查后端是否启动。' })
@@ -163,6 +173,9 @@ async function sendStream(text: string) {
   }
 }
 
+async function feedback(idx: number, rating: number) {
+  try { const m = messages.value[idx] as any; await request.post('/agent/feedback', { runId: m.runId, sessionId: sessionId.value, rating }) ; ElMessage.success(rating>0?'已点赞':'已点踩') } catch {}
+}
 function clearSession() {
   sessionId.value = 'sess-' + Math.random().toString(36).slice(2, 8)
   messages.value = [{ role: 'assistant', content: '记忆已清空，开启新会话。', agentType: 'Agent' }]

@@ -8,6 +8,8 @@ import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -30,6 +32,7 @@ public class ChatMemoryService {
     private final StringRedisTemplate redis;
     private final ObjectMapper om;
     private final JdbcTemplate jdbc;
+    @Autowired(required=false) private ChatClient chatClient;
 
     public ChatMemoryService(StringRedisTemplate redis, ObjectMapper om, JdbcTemplate jdbc) {
         this.redis = redis;
@@ -191,6 +194,19 @@ public class ChatMemoryService {
     }
 
     private String compress(List<Map<String, String>> old, String prevSummary) {
+        // Try LLM rolling summary, fallback to rule truncation
+        if (chatClient != null) {
+            try {
+                StringBuilder prompt = new StringBuilder("将以下对话压缩为150字内摘要，保留关键事实：\n");
+                if (prevSummary != null && !prevSummary.isBlank()) prompt.append("已有摘要: ").append(prevSummary).append("\n");
+                for (Map<String,String> m : old) prompt.append(m.get("role")).append(": ").append(m.get("content")).append("\n");
+                String summary = chatClient.prompt().user(prompt.toString()).call().content();
+                if (summary != null && !summary.isBlank()) {
+                    String s = summary.trim();
+                    return s.length() > 800 ? s.substring(0,800) : s;
+                }
+            } catch (Exception e) { log.debug("LLM compress fallback: {}", e.toString()); }
+        }
         StringBuilder sb = new StringBuilder();
         if (prevSummary != null && !prevSummary.isBlank()) sb.append(prevSummary).append(" | ");
         int cap = Math.min(old.size(), 10);

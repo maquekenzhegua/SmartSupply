@@ -63,7 +63,8 @@ public class KnowledgeController {
         String query = body.getOrDefault("query", "");
         if (query.isBlank()) return Result.fail(400, "query 不能为空");
         RagService.RecallDetail d = ragService.recallWithDetail(query);
-        return Result.ok(Map.of("query", query, "context", d.context(), "vectorHits", d.vectorHits(), "reranked", d.reranked(), "latencyMs", d.latencyMs()));
+        var citList = d.citations()==null? java.util.List.of() : d.citations().stream().map(c -> (Object)Map.of("docId", c.docId(), "title", c.title(), "snippet", c.snippet(), "score", c.score())).toList();
+        return Result.ok(Map.of("query", query, "context", d.context(), "citations", citList, "vectorHits", d.vectorHits(), "reranked", d.reranked(), "latencyMs", d.latencyMs()));
     }
 
     @PostMapping("/recall/batch")

@@ -197,6 +197,16 @@ public class AgentController {
             }
         }
         if (detail != null) observation.recordRag(detail.latencyMs(), detail.reranked());
+        // enforce [n] citation if rag present but reply lacks it
+        if (detail != null && detail.citations() != null && !detail.citations().isEmpty() && reply != null && !reply.contains("[")) {
+            StringBuilder cb = new StringBuilder(reply);
+            cb.append("\n\n");
+            for (int ci=0; ci<detail.citations().size() && ci<3; ci++) {
+                var c = detail.citations().get(ci);
+                cb.append("[").append(ci+1).append("] ").append(c.title()).append(" | ").append(c.snippet()).append("\n");
+            }
+            reply = cb.toString();
+        }
         Map<String, Object> data = new java.util.HashMap<>();
         data.put("reply", reply == null ? "" : reply);
         data.put("agentType", agentType);
@@ -210,6 +220,11 @@ public class AgentController {
         data.put("completionTokens", completionTokens);
         data.put("tools", usedTools);
         data.put("runId", runId);
+        if (detail != null && detail.citations() != null) {
+            var citList = new java.util.ArrayList<Map<String,Object>>();
+            for (int ci=0; ci<detail.citations().size(); ci++) { var c=detail.citations().get(ci); citList.add(Map.of("idx", ci+1, "docId", c.docId(), "title", c.title(), "snippet", c.snippet(), "score", c.score())); }
+            data.put("citations", citList);
+        }
         return Result.ok(data);
     }
 
