@@ -19,21 +19,21 @@ Spring Boot 3.5 + Spring AI  Java 编排层 (backend)
   └─ 委托：useDeep/agentType=deep 时经 PythonSidecarService -> LangGraph 边车
          ▲ 回调 Tool API（inventory/supplier 等只读）   │
          │                                              ▼
-       Python 边车 (agent-python, 复用 D:\conda_envs\ai-backend)
+       Python 边车 (agent-python，需自行配置 Python 环境，建议 conda 环境 ai-backend)
          FastAPI + LangGraph(规划->工具->反思) + Mock/真实 LLM(OpenAI 兼容)
 基础设施：PostgreSQL + pgvector + Redis（docker-compose）
 ```
 
 **开关：** 默认纯 Java 可跑；深度推理需同时满足：
 
-1. 启动边车：`D:\conda_envs\ai-backend\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8001 --reload`（或 `agent-python/start.bat`）
+1. 启动边车：`python -m uvicorn app.main:app --host 127.0.0.1 --port 8001 --reload`（或 `agent-python/start.bat`）
 2. Java 设 `AGENT_PYTHON_ENABLED=true`（`application.yml` / 环境变量 / `docker-compose.prod.yml`），前端“深度推理”开关才可用。
 
 ## 目录
 
 - `backend/` Java 17 + Spring Boot 3.5.14 + Spring AI 1.0.0 + JdbcTemplate + pgvector
 - `frontend/` Vue 3.4 + TS 5.5 + Vite 5 + Element Plus + ECharts（已 code-split，`npm run build` 产出 `dist/`）
-- `agent-python/` FastAPI + LangGraph 边车（`D:\conda_envs\ai-backend` 已装 langchain/langgraph/fastapi/openai/httpx）
+- `agent-python/` FastAPI + LangGraph 边车（需安装 langchain/langgraph/fastapi/openai/httpx 等依赖，见 requirements.txt）
 - `backend/src/main/resources/db/migration/` **Flyway 迁移 = schema 单一事实源**（V1 建表+演示数据 supplier/warehouse/product/sku/inventory/contract/knowledge_doc，V2+ 加固），compose/VM 初始化都执行这同一套脚本
 - `docker-compose.yml` 开发一键起（postgres/redis）
 - `docker-compose.prod.yml` 生产一键起（+ backend + agent-python，`SPRING_PROFILES_ACTIVE=prod`）
@@ -63,7 +63,7 @@ mvn spring-boot:run
 # 或一次性覆盖：set SPRING_DATA_REDIS_PASSWORD=change-me-strong-password && mvn spring-boot:run -Dspring-boot.run.profiles=vmware
 
 # 可选深度推理
-D:\conda_envs\ai-backend\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8001 --reload
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8001 --reload
 # 前端另起终端
 cd frontend && npm install && npm run dev
 # 前端 http://localhost:3000  账号 admin / admin123
@@ -124,7 +124,7 @@ cd backend && mvn package -DskipTests  # 已产出 81M fat jar
 cd frontend && npm run build                                # 已产出 dist/ 2247 modules
 ```
 
-> 约束：Maven 仓库 `D:\tools\maven-repository`、npm 缓存 `D:\npm-cache` / 全局 `D:\tools\npm-global`、Python `D:\conda_envs\ai-backend`，均已落盘 D 盘未侵占 C 盘。
+> 约束：Maven 仓库（本地路径）、npm 缓存（本地路径） / 全局目录（本地路径）、Python 环境建议落盘非系统盘，避免侵占 C 盘。
 
 ## 演示剧本
 

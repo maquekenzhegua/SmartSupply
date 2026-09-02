@@ -93,7 +93,7 @@ jobs:
           python -m pytest agent-python/tests/test_golden_eval.py::test_offline_recall_and_answer_keyword_coverage agent-python/tests/test_golden_eval.py::test_golden_count -v -s
           python -m pytest agent-python/tests/test_agent_eval.py -v
           python agent-python/scripts/llm_judge.py --mode mock --out docs/eval-report-mock-ci.md
-          grep -q "avg_keyword_hit" docs/eval-report-mock-ci.md
+          grep -q "avg_keyword_hit" agent-python/docs/eval-report-mock-ci.md
 
   integration:
     runs-on: ubuntu-latest

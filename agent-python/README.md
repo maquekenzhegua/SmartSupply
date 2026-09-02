@@ -5,7 +5,7 @@
 - Java 负责：鉴权、事务、Tool 执行（查库存/建采购单/搜合同）、Redis 记忆、RAG 向量库。
 - Python 负责：复杂规划与反思、多步推理、状态图编排，必要时回调 Java 的 Tool API。
 
-Python 环境复用 `D:\conda_envs\ai-backend`（已装 langchain 1.3.14 / langgraph 1.2.10 / fastapi 0.139.2 / dashscope/openai 等），新依赖需装到该 env，落盘在 `D:\conda_envs\ai-backend` 与 `D:\conda_pkgs`。
+Python 环境需自行创建（建议 `conda create -n ai-backend python=3.11`），已依赖 langchain 1.3.14 / langgraph 1.2.10 / fastapi 0.139.2 / dashscope/openai 等），见 `requirements.txt`。
 
 ## 启动
 ```bash
