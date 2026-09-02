@@ -49,9 +49,17 @@
 
 ## 加分项（主动抛）
 
-1. **可观测：** `X-Trace-Id` 全链路透传（含 SSE 子线程），`ObservationService` 对每次对话计 `prompt/completion tokens + costUsd + latency + mode`，`agent.tool.count/latency`、`rag.recall.latency` 都进 Micrometer，可在 `actuator/prometheus` 拉取。
-2. **记忆：** `ChatMemoryService` 短期 Redis 20轮进窗 + 长期 DB 落库 + 超 40 条自动摘要压缩，`GET /api/agent/memory/{sessionId}` 可查快照。
-3. **评估：** 后端 `AgentGuardTest(7)` + Python `test_tool_accuracy(5)` + `test_golden_eval(6)` 共 17+ 条离线回归，Golden 20 问 `avg_keyword_hit 0.875 / recall 0.70 / faithfulness_proxy 0.865`，工具选型与注入/HITL 均有量化；真 LLM 接入后同数据集可跑 `ragas` 的 faithfulness/context_precision。
+1. **可观测：** `X-Trace-Id` 跨 Java/Python（TraceContext + Python contextvar），`agent_run/step/tool_call` 落库可回放，`TokenContext` 隔离并发，jTokkit 真实分词，`actuator/prometheus` 拉取。
+2. **记忆与引用：** `ChatMemoryService` LLM 滚动摘要（Mock 兜底）+ `citations[]` 结构化引用 + `[n]` 强制补全 + 赞踩入 `user_feedback`。
+3. **评估：** `golden 60` + `test_agent_eval` + `llm_judge`（mock 0.90），`docs/eval-report-*.md` 双组对比，CI 门禁。
+
+### 新增剧本
+
+**Trace 回放：** 打开 `/admin/runs` 选一条 `python-deep` 记录，点详情看 `planner→tool→reflect→reasoner` 时间线与 `tool_results`，同一 `trace_id` 串联 Java 与 Python 日志。
+
+**评测报告怎么读：** `docs/eval-report-mock-*.md` 看 `avg_keyword_hit/faithfulness/relevance`，失败样本表定位召回或工具选择问题，真实模型报告对比基线提升。
+
+**越权漏洞修复：** `AgentController` 统一走 `ChatMemoryService.canAccess`，`default` 会话按 `default-{username}` 隔离，`ToolSecurity` 写操作需 ADMIN，`SecurityConfig` 收敛 actuator，`CORS` 白名单。
 
 ---
 

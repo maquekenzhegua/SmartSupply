@@ -13,13 +13,15 @@
 - 重排：`Reranker(BM25离线)` + `CrossEncoderReranker(调 Python /api/rag/rerank，熔断回退)` + `RAG_RERANK_MODE=auto|bm25|cross-encoder`
 - 深度推理：`agent-python` LangGraph `planner->tools->reflector->reasoner` 真 ReAct，`MAX_ITERS=6`，trace 可审计
 - 基础设施：PostgreSQL + pgvector、Redis、MinIO，Docker Compose 一键起
+- 观测：agent_run/step/tool_call/user_feedback + prompt_version 落库，TraceId 跨 Java/Python，jTokkit 真实计费
+- 治理：/api/admin/agent/{runs,costs,prompts,eval} ADMIN 只读
 
 ## 关键序列
 
 ### 合同风控（RAG + 引用 + 防幻觉）
 上传 -> Tika 解析 -> `TextSplitter 800/100` -> `knowledge_doc` + `knowledge_chunk(embedding 1536)` -> `PgVectorStore.similaritySearch(topK=8)->CrossEncoderReranker(auto: Python cross-encoder->BM25回退) top4 + rag.rerank.count 指标` + `ILIKE 兜底3` -> `PromptGuard.wrap(<knowledge>+<user_query>)` -> `PromptRegistry v3.0(仅基于召回+引用)` -> `ChatClient -- usage回填actual/estimated + TTFT` -> `enforceCitation([引用])` -> 写 `contract_risk_report`
 
-切面：`TraceIdFilter` 全链路 traceId，`ObservationService` 记录 `agent.chat.tokens/cost/latency(source=actual|estimated)`、`agent.chat.ttft(首字)`、`rag.recall.latency`、`rag.rerank.count(mode)`、`agent.tool.count/latency`，`logback` 带 `%X{traceId}` 滚动文件；`GET /api/agent/metrics/summary` 聚合可视化，SSE 的 `done` 事件回传 `{ttfbMs,totalMs,tokenSource}`。
+切面：`TraceIdFilter` + `TraceContext` 全链路 `X-Trace-Id`（含 SSE），`ObservationService` 计数器+异步落库 `agent_run/step/tool_call`，`TokenContext` 隔离并发，jTokkit `cl100k_base` 真实分词；`GET /api/agent/metrics/summary` + `actuator/prometheus`。
 
 ### 补货预测（ReAct + HITL）
 用户点“AI建议”或定时任务 -> `AgentController` 检测写意图 -> 若 `confirmCreate!=true` 返回 `needConfirm` 前端二次确认 -> `ChatClient` 携带 `InventoryTools/PurchaseTools/CatalogTools/ContractTools` -> LLM 多轮 `planner->tools->reflector` 自主选择 `listLowStock/getInventory/listSuppliers/createPurchaseOrder` -> `ToolSecurity` 鉴权 + `IdempotencyService(10min)` + 入参校验 + DRAFT 默认需审批 -> 前端展示建议 + 采购单表新增 DRAFT
@@ -44,7 +46,8 @@ Python 深度推理：前端 `useDeep=true` 且边车健康时 `PythonSidecarSer
 - 指标：`ObservationService` -> Micrometer `agent.chat.latency/tokens{source}/cost{source}`、`agent.chat.ttft`、`agent.tool.count/latency`、`rag.recall.latency`、`rag.rerank.count{mode}`，`management.endpoints=health,metrics,prometheus` + `GET /api/agent/metrics/summary`
 - 日志：`logback-spring.xml` `%d [%thread] %-5level [%X{traceId}] %logger - %msg` 控制台+滚动文件 `20MB*14天`
 
-## 扩展
+## 扩展与治理
 
-- MCP：引入 `spring-ai-starter-mcp-server`，将 `@Tool` 暴露为 MCP Tool
-- 评估：`agent-python/tests/golden_rag.jsonl` 20 条 + `test_golden_eval.py(6)` 离线规则指标，`test_tool_accuracy.py(5)` 工具选型/注入/幻觉/HITL 回归，`AgentGuardTest(7)` 后端注入/HITL/引用/Token 回归
+- 治理后台：`/admin/agent/runs`（筛选+回放）、`/admin/agent/costs`（ECharts）、`/admin/agent/prompts`（版本+回滚）、`/admin/agent/eval`（趋势+失败样本），前端路由 ADMIN 守卫
+- 评估：`golden_rag.jsonl` 60 条 + `test_agent_eval` + `llm_judge`（faithfulness/relevance 0-2），产出 `docs/eval-report-*.md`，CI mock 门禁
+- MCP：`@Tool` 可暴露为 MCP Tool
