@@ -20,14 +20,18 @@ docker run -d --name smartsupply-postgres \
   pgvector/pgvector:pg16
 # 等待就绪（注意转义 @）
 for i in {1..30}; do docker exec smartsupply-postgres pg_isready -U dev -d smartsupply && break || sleep 2; done
-echo "=== 3/3 初始化表（需把宿主机 D:/Agent/sql/init.sql 拷到虚拟机 /tmp/init.sql） ==="
-if [ -f /tmp/init.sql ]; then
-  docker exec -i smartsupply-postgres psql -U dev -d smartsupply < /tmp/init.sql
-  echo "init.sql 已导入"
+echo "=== 3/3 初始化表（单一事实源=Flyway 迁移目录，需把宿主机 D:/Agent/backend/src/main/resources/db/migration 拷到虚拟机 /tmp/migrations） ==="
+if [ -d /tmp/migrations ]; then
+  # 按文件名顺序执行（V1、V2、V3...），与后端启动时 Flyway 应用的是同一套脚本
+  for f in $(ls /tmp/migrations/*.sql | sort -V); do
+    echo "--> 应用 $f"
+    docker exec -i smartsupply-postgres psql -U dev -d smartsupply < "$f"
+  done
+  echo "Flyway 迁移目录已导入"
 else
-  echo "未找到 /tmp/init.sql，请先 scp："
-  echo "  scp D:/Agent/sql/init.sql dev@192.168.10.100:/tmp/init.sql"
-  echo "然后重跑：docker exec -i smartsupply-postgres psql -U dev -d smartsupply < /tmp/init.sql"
+  echo "未找到 /tmp/migrations，请先 scp："
+  echo "  scp -r D:/Agent/backend/src/main/resources/db/migration dev@192.168.10.100:/tmp/migrations"
+  echo "然后重跑本脚本第 3 步"
 fi
 echo "=== 放行防火墙 ==="
 if command -v firewall-cmd >/dev/null 2>&1; then

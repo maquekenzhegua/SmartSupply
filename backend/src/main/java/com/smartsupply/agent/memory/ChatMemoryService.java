@@ -147,6 +147,11 @@ public class ChatMemoryService {
             if (sessionDbId != null) {
                 jdbc.update("INSERT INTO chat_message(session_id, role, content) VALUES (?,?,?)",
                         sessionDbId, role, content == null ? "" : content);
+                // 认领存量无主会话：首个写入者绑定（已绑定则不动），配合 canAccess 形成会话隔离闭环
+                Long claimUserId = resolveUserId(username);
+                if (claimUserId != null) {
+                    jdbc.update("UPDATE chat_session SET user_id=? WHERE id=? AND user_id IS NULL", claimUserId, sessionDbId);
+                }
             }
         } catch (Exception e) {
             log.debug("DB append failed sessionId={}: {}", sessionId, e.toString());
@@ -165,6 +170,15 @@ public class ChatMemoryService {
         } catch (Exception e) {
             return null;
         }
+    }
+
+    /**
+     * 会话访问裁决：无主（新会话/存量未绑定）放行并由首次 append 认领；仅归属者本人放行。
+     * /chat、/chat/stream、/memory/{id} 统一走这里，堵住"猜到 sessionId 即可续写/读取他人上下文"的 IDOR。
+     */
+    public boolean canAccess(String sessionId, String username) {
+        String owner = sessionOwner(sessionId);
+        return owner == null || (username != null && owner.equals(username));
     }
 
     private Long resolveUserId(String username) {

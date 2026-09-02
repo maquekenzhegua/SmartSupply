@@ -36,6 +36,9 @@ management:
 smartsupply:
   ai:
     mock: ${AI_MOCK:false}
+  agent:
+    tool:
+      allow-anonymous-read: ${AGENT_TOOL_ALLOW_ANONYMOUS_READ:false}
   jwt:
     secret: ${JWT_SECRET:}
     expire-hours: 12
@@ -43,6 +46,10 @@ smartsupply:
     enabled: ${AGENT_PYTHON_ENABLED:false}
     base-url: ${AGENT_PYTHON_URL:http://agent-python:8001}
     timeout-ms: 12000
+
+security:
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:}
 logging:
   level:
     com.smartsupply: INFO

@@ -21,14 +21,24 @@ public final class CurrentUser {
 
     /** JWT role claim -> JwtAuthFilter 写入的 ROLE_* authority，去前缀返回（如 ADMIN）；未登录返回 null */
     public static String role() {
+        List<String> roles = roles();
+        return roles.isEmpty() ? null : roles.get(0);
+    }
+
+    /** 当前用户全部角色（ROLE_* 去前缀）；未登录返回空列表 */
+    public static List<String> roles() {
         Authentication a = SecurityContextHolder.getContext().getAuthentication();
-        if (a == null || !isReal(a)) return null;
-        List<String> roles = a.getAuthorities().stream()
+        if (a == null || !isReal(a)) return List.of();
+        return a.getAuthorities().stream()
                 .map(GrantedAuthority::getAuthority)
                 .filter(s -> s.startsWith("ROLE_"))
                 .map(s -> s.substring("ROLE_".length()))
                 .toList();
-        return roles.isEmpty() ? null : roles.get(0);
+    }
+
+    /** 是否具备指定角色（多角色场景不能只看第一个） */
+    public static boolean hasRole(String role) {
+        return roles().contains(role);
     }
 
     private static boolean isReal(Authentication a) {

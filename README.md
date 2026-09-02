@@ -30,7 +30,7 @@ Spring Boot 3.5 + Spring AI  Java 编排层 (backend)
 - `backend/` Java 17 + Spring Boot 3.5.14 + Spring AI 1.0.0 + JdbcTemplate + pgvector
 - `frontend/` Vue 3.4 + TS 5.5 + Vite 5 + Element Plus + ECharts（已 code-split，`npm run build` 产出 `dist/`）
 - `agent-python/` FastAPI + LangGraph 边车（`D:\conda_envs\ai-backend` 已装 langchain/langgraph/fastapi/openai/httpx）
-- `sql/init.sql` 演示数据（supplier/warehouse/product/sku/inventory/contract/knowledge_doc）
+- `backend/src/main/resources/db/migration/` **Flyway 迁移 = schema 单一事实源**（V1 建表+演示数据 supplier/warehouse/product/sku/inventory/contract/knowledge_doc，V2+ 加固），compose/VM 初始化都执行这同一套脚本
 - `docker-compose.yml` 开发一键起（postgres/redis/minio）
 - `docker-compose.prod.yml` 生产一键起（+ backend + agent-python，`SPRING_PROFILES_ACTIVE=prod`）
 - `docs/` 架构与 3 分钟面试剧本
@@ -44,8 +44,9 @@ Spring Boot 3.5 + Spring AI  Java 编排层 (backend)
 docker run -d --name smartsupply-postgres -p 5432:5432 -v pgdata:/var/lib/postgresql/data \
   -e POSTGRES_DB=smartsupply -e POSTGRES_USER=dev -e POSTGRES_PASSWORD='change-me-strong-password' \
   pgvector/pgvector:pg16
-# 初始化（把 D:/Agent/sql/init.sql 拷到虚拟机后执行）
-PGPASSWORD='change-me-strong-password' psql -h 127.0.0.1 -U dev -d smartsupply -f /tmp/init.sql  # /tmp/init.sql 为 scp 后的路径
+# 初始化（Flyway 迁移目录是唯一 schema 源；把 D:/Agent/backend/src/main/resources/db/migration 整目录拷到虚拟机后按序执行，或直接跑 vm-setup/install-pgvector.sh）
+scp -r D:/Agent/backend/src/main/resources/db/migration dev@192.168.10.100:/tmp/migrations
+for f in $(ls /tmp/migrations/*.sql | sort -V); do PGPASSWORD='change-me-strong-password' psql -h 127.0.0.1 -U dev -d smartsupply -f "$f"; done  # 也可直接重跑 vm-setup/install-pgvector.sh
 # 确认 Redis 密码与端口放行（你已设 change-me-strong-password）
 redis-cli -h 127.0.0.1 -a 'change-me-strong-password' ping  # 无用户名，仅密码；应返回 PONG
 # 按需放行防火墙

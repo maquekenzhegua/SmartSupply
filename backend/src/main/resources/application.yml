@@ -55,6 +55,15 @@ smartsupply:
     enabled: ${AGENT_PYTHON_ENABLED:false}
     base-url: ${AGENT_PYTHON_URL:http://127.0.0.1:8001}
     timeout-ms: 12000
+  agent:
+    tool:
+      # 无 Key 演示允许匿名只读工具；prod 覆盖为 false（读工具同样要求登录）
+      allow-anonymous-read: ${AGENT_TOOL_ALLOW_ANONYMOUS_READ:true}
+
+security:
+  cors:
+    # 精确白名单（逗号分隔），不再 "*" + credentials
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000,http://127.0.0.1:3000}
 
 knife4j:
   enable: true

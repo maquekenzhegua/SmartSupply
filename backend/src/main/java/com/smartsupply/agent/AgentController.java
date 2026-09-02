@@ -75,7 +75,13 @@ public class AgentController {
         String message = guard.sanitizeUserInput(rawMessage);
         boolean flagged = guard.containsInjection(rawMessage);
         String agentType = body.getOrDefault("agentType", "general");
-        String sessionId = body.getOrDefault("sessionId", "default");
+        final String user = com.smartsupply.common.CurrentUser.username();
+        String rawSessionId = body.getOrDefault("sessionId", "default-" + user);
+        // "default" 归一化为按用户隔离的缺省会话；final 以便后续 lambda 捕获
+        final String sessionId = "default".equals(rawSessionId) ? "default-" + user : rawSessionId;
+        if (!memory.canAccess(sessionId, user)) {
+            return Result.fail(403, "无权访问该会话");
+        }
         boolean requireConfirm = "true".equalsIgnoreCase(body.getOrDefault("confirmCreate", "false"));
         if (message.isBlank()) return Result.fail(400, "message 不能为空");
         if (isWriteIntent(message) && !requireConfirm) {
@@ -105,8 +111,8 @@ public class AgentController {
             msgs.add(Map.of("role", "user", "content", userContent));
             String deepReply = pythonSidecar.reason(msgs, agentType, sessionId);
             if (deepReply != null && !deepReply.isBlank()) {
-                memory.append(sessionId, "user", message);
-                memory.append(sessionId, "assistant", deepReply);
+                memory.append(sessionId, "user", message, user);
+                memory.append(sessionId, "assistant", deepReply, user);
                 int promptTokens = tokenEstimator.estimate(systemPrompt + userContent + history.size() * 200);
                 int completionTokens = tokenEstimator.estimate(deepReply);
                 double cost = tokenEstimator.estimateCostUsd(promptTokens, completionTokens);
@@ -132,8 +138,8 @@ public class AgentController {
             usedTools = com.smartsupply.agent.tools.ToolSecurity.endToolTrace();
         }
         reply = enforceCitation(reply, ragContext);
-        memory.append(sessionId, "user", message, com.smartsupply.common.CurrentUser.username());
-        memory.append(sessionId, "assistant", reply == null ? "" : reply, com.smartsupply.common.CurrentUser.username());
+        memory.append(sessionId, "user", message, user);
+        memory.append(sessionId, "assistant", reply == null ? "" : reply, user);
         // 优先用模型 usage 回填 actual，否则用估算 estimated
         int promptTokens;
         int completionTokens;
@@ -173,14 +179,25 @@ public class AgentController {
         SseEmitter emitter = new SseEmitter(120_000L);
         String traceId = MDC.get(TraceIdFilter.TRACE_ID);
         String capturedTrace = traceId;
+        // 在请求线程解析并校验（SSE 线程池无 SecurityContext，username/sessionId 必须在进入线程前定妥）
+        String raw = body.getOrDefault("message", "");
+        String message = guard.sanitizeUserInput(raw);
+        String agentType = body.getOrDefault("agentType", "general");
+        final String streamUser = com.smartsupply.common.CurrentUser.username();
+        String rawSessionId = body.getOrDefault("sessionId", "default-" + streamUser);
+        // final：SSE 线程池 lambda 捕获；"default" 归一化为按用户隔离的缺省会话
+        final String sessionId = "default".equals(rawSessionId) ? "default-" + streamUser : rawSessionId;
+        if (!memory.canAccess(sessionId, streamUser)) {
+            try {
+                emitter.send(SseEmitter.event().data("无权访问该会话").name("error"));
+                emitter.complete();
+            } catch (Exception ignored) {}
+            return emitter;
+        }
         long streamStart = System.currentTimeMillis();
         sseExecutor.execute(() -> {
             try {
                 MDC.put(TraceIdFilter.TRACE_ID, capturedTrace == null ? "stream" : capturedTrace);
-                String raw = body.getOrDefault("message", "");
-                String message = guard.sanitizeUserInput(raw);
-                String agentType = body.getOrDefault("agentType", "general");
-                String sessionId = body.getOrDefault("sessionId", "default");
                 String systemPrompt = prompts.contentFor(agentType);
                 String ragContext = "";
                 if ("contract".equals(agentType) || message.contains("合同")) ragContext = ragService.recall(message);
@@ -226,8 +243,8 @@ public class AgentController {
                                         reply = fallback;
                                         for (String ch : reply.split("")) emitter.send(SseEmitter.event().data(String.valueOf(ch)).name("token"));
                                     }
-                                    memory.append(sessionId, "user", message, com.smartsupply.common.CurrentUser.username());
-                                    memory.append(sessionId, "assistant", reply, com.smartsupply.common.CurrentUser.username());
+                                    memory.append(sessionId, "user", message, streamUser);
+                                    memory.append(sessionId, "assistant", reply, streamUser);
                                     long totalMs = System.currentTimeMillis() - streamStart;
                                     long pt2 = MuseSparkChatModel.consumeLastPromptTokens();
                                     long ct2 = MuseSparkChatModel.consumeLastCompletionTokens();
@@ -251,8 +268,8 @@ public class AgentController {
                 } catch (Exception ex) {
                     String reply = enforceCitation(spec.user(finalUserContent).tools(inventoryTools, purchaseTools, contractTools, catalogTools).call().content(), finalRagContext);
                     String text = reply == null ? "" : reply;
-                    memory.append(sessionId, "user", message, com.smartsupply.common.CurrentUser.username());
-                    memory.append(sessionId, "assistant", text, com.smartsupply.common.CurrentUser.username());
+                    memory.append(sessionId, "user", message, streamUser);
+                    memory.append(sessionId, "assistant", text, streamUser);
                     for (String ch : text.split("")) { emitter.send(SseEmitter.event().data(String.valueOf(ch)).name("token")); }
                     long totalMs = System.currentTimeMillis() - streamStart;
                     observation.recordChat(agentType, "stream-fallback", totalMs, tokenEstimator.estimate(systemPrompt + finalUserContent), tokenEstimator.estimate(text), tokenEstimator.estimateCostUsd(tokenEstimator.estimate(text), tokenEstimator.estimate(text)), capturedTrace == null ? "stream" : capturedTrace, "estimated");
@@ -293,12 +310,12 @@ public class AgentController {
 
     @GetMapping("/memory/{sessionId}")
     public Result<Map<String, Object>> memoryView(@PathVariable String sessionId) {
-        // 会话隔离：session 归属他人时拒绝读取（user_id 为空的存量会话兼容放行）
+        // 会话隔离统一裁决（与 /chat、/chat/stream 同一 canAccess）：无主可读，仅归属者/ADMIN 可读他人
         String viewer = com.smartsupply.common.CurrentUser.username();
-        String owner = memory.sessionOwner(sessionId);
-        if (owner != null && viewer != null && !"system".equals(viewer) && !viewer.equals(owner)) {
+        if (!memory.canAccess(sessionId, viewer) && !com.smartsupply.common.CurrentUser.hasRole("ADMIN")) {
             return Result.fail(403, "无权查看他人会话");
         }
+        String owner = memory.sessionOwner(sessionId);
         ChatMemoryService.MemorySnapshot snap = memory.snapshot(sessionId, prompts.contentFor("general"));
         return Result.ok(Map.of("sessionId", sessionId, "owner", owner == null ? "" : owner, "size", snap.messages().size(), "summary", snap.summary() == null ? "" : snap.summary(), "messages", snap.messages()));
     }
