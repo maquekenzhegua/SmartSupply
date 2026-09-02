@@ -10,9 +10,9 @@ Python 环境复用 `D:\conda_envs\ai-backend`（已装 langchain 1.3.14 / langg
 ## 启动
 ```bash
 # 激活 env（Git Bash 用 conda）
-conda activate D:/conda_envs/ai-backend
+conda activate ai-backend  # 或你创建的环境名
 # 或直接用该 env 的 python
-D:/conda_envs/ai-backend/python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
 ```
 
 ## 配置

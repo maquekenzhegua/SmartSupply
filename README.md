@@ -2,6 +2,8 @@
 
 > 大厂主流：**Java 业务编排 + Python LangGraph 深度推理 + Vue3 前端**。无 Key 可跑，有 Key 一键切真实模型。
 
+> **Demo Mode**：本项目内置演示账号 `admin / admin123`，仅用于本地演示与面试复现，生产环境请通过环境变量 `DEMO_ADMIN_PASSWORD` 或数据库用户表覆盖，勿在公网暴露默认口令。
+
 ## 架构
 
 ```
@@ -19,7 +21,7 @@ Spring Boot 3.5 + Spring AI  Java 编排层 (backend)
          │                                              ▼
        Python 边车 (agent-python, 复用 D:\conda_envs\ai-backend)
          FastAPI + LangGraph(规划->工具->反思) + Mock/真实 LLM(OpenAI 兼容)
-基础设施：PostgreSQL + pgvector + Redis + MinIO（docker-compose）
+基础设施：PostgreSQL + pgvector + Redis（docker-compose）
 ```
 
 **开关：** 默认纯 Java 可跑；深度推理需同时满足：
@@ -33,21 +35,21 @@ Spring Boot 3.5 + Spring AI  Java 编排层 (backend)
 - `frontend/` Vue 3.4 + TS 5.5 + Vite 5 + Element Plus + ECharts（已 code-split，`npm run build` 产出 `dist/`）
 - `agent-python/` FastAPI + LangGraph 边车（`D:\conda_envs\ai-backend` 已装 langchain/langgraph/fastapi/openai/httpx）
 - `backend/src/main/resources/db/migration/` **Flyway 迁移 = schema 单一事实源**（V1 建表+演示数据 supplier/warehouse/product/sku/inventory/contract/knowledge_doc，V2+ 加固），compose/VM 初始化都执行这同一套脚本
-- `docker-compose.yml` 开发一键起（postgres/redis/minio）
+- `docker-compose.yml` 开发一键起（postgres/redis）
 - `docker-compose.prod.yml` 生产一键起（+ backend + agent-python，`SPRING_PROFILES_ACTIVE=prod`）
 - `docs/` 架构与 3 分钟面试剧本
 
 ## 一键启动
 
-### 你的环境（VMware 直连，已配置 192.168.10.100，Windows 不再起任何数据库）
+### 你的环境（VMware 直连，已配置远程数据库，本地不再起数据库）
 
 ```bash
 # 1) VMware 里（与你现有 MySQL/Redis 共存，新增 PG 向量库）
 docker run -d --name smartsupply-postgres -p 5432:5432 -v pgdata:/var/lib/postgresql/data \
   -e POSTGRES_DB=smartsupply -e POSTGRES_USER=dev -e POSTGRES_PASSWORD='change-me-strong-password' \
   pgvector/pgvector:pg16
-# 初始化（Flyway 迁移目录是唯一 schema 源；把 D:/Agent/backend/src/main/resources/db/migration 整目录拷到虚拟机后按序执行，或直接跑 vm-setup/install-pgvector.sh）
-scp -r D:/Agent/backend/src/main/resources/db/migration dev@192.168.10.100:/tmp/migrations
+# 初始化（Flyway 迁移目录是唯一 schema 源；把 backend/src/main/resources/db/migration 整目录拷到虚拟机后按序执行，或直接跑 vm-setup/install-pgvector.sh）
+scp -r backend/src/main/resources/db/migration user@<VM_IP>:/tmp/migrations
 for f in $(ls /tmp/migrations/*.sql | sort -V); do PGPASSWORD='change-me-strong-password' psql -h 127.0.0.1 -U dev -d smartsupply -f "$f"; done  # 也可直接重跑 vm-setup/install-pgvector.sh
 # 确认 Redis 密码与端口放行（你已设 change-me-strong-password）
 redis-cli -h 127.0.0.1 -a 'change-me-strong-password' ping  # 无用户名，仅密码；应返回 PONG
@@ -55,7 +57,7 @@ redis-cli -h 127.0.0.1 -a 'change-me-strong-password' ping  # 无用户名，仅
 sudo firewall-cmd --permanent --add-port=5432/tcp --add-port=6379/tcp --add-port=9000/tcp && sudo firewall-cmd --reload
 
 # 2) Windows（直连 VMware，不执行 docker-compose.yml）
-cd D:/Agent/backend
+cd backend
 set SPRING_PROFILES_ACTIVE=vmware
 mvn spring-boot:run
 # 或一次性覆盖：set SPRING_DATA_REDIS_PASSWORD=change-me-strong-password && mvn spring-boot:run -Dspring-boot.run.profiles=vmware
@@ -63,20 +65,20 @@ mvn spring-boot:run
 # 可选深度推理
 D:\conda_envs\ai-backend\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8001 --reload
 # 前端另起终端
-cd D:/Agent/frontend && npm install && npm run dev
+cd frontend && npm install && npm run dev
 # 前端 http://localhost:3000  账号 admin / admin123
 # 后端 http://localhost:8080  文档 /doc.html  健康 /actuator/health
 # 边车 http://127.0.0.1:8001  健康 /health  推理 POST /api/reason
 # 自检：Windows 侧执行
-# powershell -Command "Test-NetConnection 192.168.10.100 -Port 5432,6379"
-# curl http://192.168.10.100:5432  应建连；redis-cli -h 192.168.10.100 -a 'change-me-strong-password' ping
+# powershell -Command "Test-NetConnection <VM_IP> -Port 5432,6379"
+# curl http://<VM_IP>:5432  应建连；redis-cli -h <VM_IP> -a 'change-me-strong-password' ping
 ```
 
 ### 面试官演示（Windows 本地 docker-compose 一键起，仅备用）
 
 ```bash
-docker-compose up -d          # 起 pgvector + redis + minio（你本地不需要，仅给面试官）
-cd D:/Agent/backend && mvn spring-boot:run  # 默认连 localhost
+docker-compose up -d          # 起 pgvector + redis
+cd backend && mvn spring-boot:run  # 默认连 localhost
 ```
 
 ### 生产（VMware/云服务器同理，用 .env 外置）
@@ -118,8 +120,8 @@ docker compose -f docker-compose.prod.yml --env-file .env up -d --build
 ## 验证
 
 ```bash
-cd D:/Agent/backend && D:/tools/Maven/bin/mvn package -DskipTests  # 已产出 81M fat jar
-cd D:/Agent/frontend && npm run build                                # 已产出 dist/ 2247 modules
+cd backend && mvn package -DskipTests  # 已产出 81M fat jar
+cd frontend && npm run build                                # 已产出 dist/ 2247 modules
 ```
 
 > 约束：Maven 仓库 `D:\tools\maven-repository`、npm 缓存 `D:\npm-cache` / 全局 `D:\tools\npm-global`、Python `D:\conda_envs\ai-backend`，均已落盘 D 盘未侵占 C 盘。

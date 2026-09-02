@@ -11,3 +11,24 @@ __pycache__/
 *.bak
 *.log
 .zcode/
+# OS
+.DS_Store
+Thumbs.db
+
+# Env & secrets
+.env.*
+!.env.example
+
+# Build
+*.jar
+*.class
+
+# Eval reports with secrets - keep mock baseline, ignore real LLM reports with raw outputs
+docs/eval-report-real-*.md
+
+# Frontend
+frontend/dist/
+frontend/node_modules/
+
+# Backend
+backend/target/

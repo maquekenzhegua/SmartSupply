@@ -18,6 +18,6 @@
 ## 本地验证
 
 ```bash
-cd D:/Agent/backend && mvn -o test -Dtest=RagServiceTest,AgentGuardTest -f pom.xml  # 13 passed
-cd D:/Agent/agent-python && D:/conda_envs/ai-backend/python.exe -m pytest tests/test_golden_eval.py tests/test_tool_accuracy.py -v  # 11 passed
+cd backend && mvn -o test -Dtest=RagServiceTest,AgentGuardTest -f pom.xml  # 13 passed
+cd agent-python && python -m pytest tests/test_golden_eval.py tests/test_tool_accuracy.py -v  # 11 passed
 ```

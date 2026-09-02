@@ -63,7 +63,7 @@
 ## 8 一键重放
 
 ```bash
-D:/tools/Maven/bin/mvn -o test -f D:/Agent/backend/pom.xml
-cd D:/Agent/agent-python && D:/conda_envs/ai-backend/python.exe -m pytest tests/ -v
-cd D:/Agent/agent-python && D:/conda_envs/ai-backend/python.exe -m pytest tests/test_golden_eval.py tests/test_tool_accuracy.py -s -v
+mvn -o test -f backend/pom.xml
+cd agent-python && python -m pytest tests/ -v
+cd agent-python && python -m pytest tests/test_golden_eval.py tests/test_tool_accuracy.py -s -v
 ```

@@ -1,15 +1,16 @@
-# VMware 直连 — Windows 不再起任何数据库/Redis，全连 VM
+# VMware / 远程数据库直连 — 本地不再起数据库/Redis，全连远程主机
 # 启动：set SPRING_PROFILES_ACTIVE=vmware && mvn spring-boot:run
+# 将 <VM_IP> 替换为你的虚拟机/云服务器 IP，或通过 SPRING_DATASOURCE_URL / SPRING_DATA_REDIS_HOST 环境变量覆盖
 # 凭据一律从环境变量/系统属性注入（见 .env.example），不在本文件落明文
 spring:
   datasource:
-    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://192.168.10.100:5432/smartsupply}
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://${VM_IP:localhost}:5432/smartsupply}
     username: ${SPRING_DATASOURCE_USERNAME:dev}
     password: ${SPRING_DATASOURCE_PASSWORD:}
     driver-class-name: org.postgresql.Driver
   data:
     redis:
-      host: ${SPRING_DATA_REDIS_HOST:192.168.10.100}
+      host: ${SPRING_DATA_REDIS_HOST:${VM_IP:localhost}}
       port: ${SPRING_DATA_REDIS_PORT:6379}
       # Redis 无用户名，仅密码（VM 已配置 requirepass）
       password: ${SPRING_DATA_REDIS_PASSWORD:}
@@ -38,7 +39,7 @@ logging:
     org.springframework.ai: INFO
 
 # 说明
-# - VM IP: ens33 192.168.10.100（外网），宿主机 192.168.10.1，Docker 172.17.0.1 仅容器间用
+# - 远程主机 IP 通过环境变量 VM_IP 注入（见 .env.example），不要提交真实 IP 到仓库
 # - 凭据（PG/Redis/MySQL/MinIO）只走环境变量，参考 .env.example，切勿提交明文到仓库
 
 management:
