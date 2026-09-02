@@ -15,6 +15,14 @@ app = FastAPI(title="SmartSupply LangGraph Sidecar", version="2.0.0")
 @app.middleware("http")
 async def add_trace(request: Request, call_next):
     trace_id = request.headers.get("X-Trace-Id") or uuid.uuid4().hex[:16]
+    user_role = request.headers.get("X-User-Role") or ""
+    # propagate to tools contextvar
+    try:
+        from .tools import set_trace_context
+        set_trace_context(trace_id, user_role)
+    except Exception:
+        pass
+    request.state.trace_id = trace_id
     response = await call_next(request)
     response.headers["X-Trace-Id"] = trace_id
     return response
@@ -41,10 +49,11 @@ async def tools():
 
 
 @app.post("/api/reason")
-async def reason(req: ReasonRequest):
+async def reason(req: ReasonRequest, request: Request):
     try:
         data = await run_reasoning_with_trace(req.messages, req.agentType)
-        return {"reply": data["reply"], "agentType": req.agentType, "sessionId": req.sessionId, "trace": data["trace"], "toolResults": data["tool_results"], "iters": data["iters"], "mode": "langgraph-react"}
+        # snake_case fallback for Java side
+        return {"reply": data["reply"], "agentType": req.agentType, "sessionId": req.sessionId, "trace": data["trace"], "tool_results": data["tool_results"], "toolResults": data["tool_results"], "iters": data["iters"], "mode": "langgraph-react"}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e), "fallback": True})
 

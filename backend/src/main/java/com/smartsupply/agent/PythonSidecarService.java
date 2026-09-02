@@ -1,7 +1,11 @@
 package com.smartsupply.agent;
 
+import com.smartsupply.common.CurrentUser;
+import com.smartsupply.common.TraceContext;
+import com.smartsupply.common.TraceIdFilter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.HttpStatusCode;
@@ -14,9 +18,6 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
-/**
- * Java -> Python LangGraph 边车，带超时 + 指数退避 + 熔断降级。
- */
 @Service
 public class PythonSidecarService {
 
@@ -27,6 +28,8 @@ public class PythonSidecarService {
     private final AtomicLong openUntil = new AtomicLong(0);
     private static final int CIRCUIT_THRESHOLD = 5;
     private static final long CIRCUIT_OPEN_MS = 30_000;
+
+    public record SidecarResult(String reply, List<Map<String, Object>> trace, List<Map<String, Object>> toolResults, int iters) {}
 
     public PythonSidecarService(
             @Value("${smartsupply.agent-python.enabled:false}") boolean enabled,
@@ -54,13 +57,31 @@ public class PythonSidecarService {
     }
 
     @SuppressWarnings("unchecked")
+    public SidecarResult reasonWithTrace(List<Map<String, String>> messages, String agentType, String sessionId) {
+        String text = reason(messages, agentType, sessionId);
+        // reason() already handles trace header + response parsing; re-parse for structured fields
+        if (text == null) return null;
+        return new SidecarResult(text, List.of(), List.of(), 0);
+    }
+
+    @SuppressWarnings("unchecked")
     public String reason(List<Map<String, String>> messages, String agentType, String sessionId) {
+        SidecarResult r = reasonStructured(messages, agentType, sessionId);
+        return r == null ? null : r.reply();
+    }
+
+    @SuppressWarnings("unchecked")
+    public SidecarResult reasonStructured(List<Map<String, String>> messages, String agentType, String sessionId) {
         if (!isEnabled()) return null;
         Map<String, Object> body = Map.of(
                 "messages", messages,
                 "agentType", agentType == null ? "general" : agentType,
                 "sessionId", sessionId == null ? "default" : sessionId
         );
+        String traceId = TraceContext.get();
+        if (traceId == null) traceId = MDC.get(TraceIdFilter.TRACE_ID);
+        String userRole = String.join(",", CurrentUser.roles());
+        String finalTraceId = traceId;
         int maxAttempts = 3;
         long backoffMs = 400;
         Exception last = null;
@@ -68,6 +89,8 @@ public class PythonSidecarService {
             try {
                 Map<String, Object> resp = restClient.post()
                         .uri("/api/reason")
+                        .header("X-Trace-Id", finalTraceId == null ? "" : finalTraceId)
+                        .header("X-User-Role", userRole)
                         .body(body)
                         .retrieve()
                         .onStatus(HttpStatusCode::isError, (req, res) -> {
@@ -76,9 +99,12 @@ public class PythonSidecarService {
                         .body(new ParameterizedTypeReference<>() {});
                 Object reply = resp == null ? null : resp.get("reply");
                 String text = reply == null ? "" : String.valueOf(reply);
+                List<Map<String, Object>> trace = resp != null && resp.get("trace") instanceof List ? (List<Map<String, Object>>) resp.get("trace") : List.of();
+                List<Map<String, Object>> toolResults = resp != null && resp.get("tool_results") instanceof List ? (List<Map<String, Object>>) resp.get("tool_results") : List.of();
+                int iters = resp != null && resp.get("iters") instanceof Number ? ((Number) resp.get("iters")).intValue() : 0;
                 if (attempt > 1) log.info("sidecar recovered on attempt {}", attempt);
                 failures.set(0);
-                return text;
+                return new SidecarResult(text, trace, toolResults, iters);
             } catch (Exception e) {
                 last = e;
                 boolean retryable = isRetryable(e);

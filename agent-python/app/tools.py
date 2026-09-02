@@ -4,10 +4,22 @@ from typing import Any, Dict, List
 from . import config
 
 
+import contextvars
+_trace_var: contextvars.ContextVar[str] = contextvars.ContextVar("trace_id", default="")
+_role_var: contextvars.ContextVar[str] = contextvars.ContextVar("user_role", default="")
+
+def set_trace_context(trace_id: str, user_role: str = ""):
+    if trace_id: _trace_var.set(trace_id)
+    if user_role: _role_var.set(user_role)
+
 def _headers() -> Dict[str, str]:
     h: Dict[str, str] = {}
     if config.JAVA_JWT_TOKEN:
         h["Authorization"] = f"Bearer {config.JAVA_JWT_TOKEN}"
+    tid = _trace_var.get("")
+    if tid: h["X-Trace-Id"] = tid
+    role = _role_var.get("")
+    if role: h["X-User-Role"] = role
     return h
 
 

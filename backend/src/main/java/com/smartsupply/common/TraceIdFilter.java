@@ -28,11 +28,13 @@ public class TraceIdFilter extends OncePerRequestFilter {
             traceId = UUID.randomUUID().toString().replace("-", "").substring(0, 16);
         }
         MDC.put(TRACE_ID, traceId);
+        TraceContext.set(traceId);
         res.setHeader(HEADER, traceId);
         try {
             chain.doFilter(req, res);
         } finally {
             MDC.remove(TRACE_ID);
+            TraceContext.clear();
         }
     }
 }

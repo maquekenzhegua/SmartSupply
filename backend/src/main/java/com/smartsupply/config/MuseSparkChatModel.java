@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 
+import com.smartsupply.common.TokenContext;
 import reactor.core.publisher.Flux;
 import reactor.core.scheduler.Schedulers;
 
@@ -46,9 +47,31 @@ public class MuseSparkChatModel implements ChatModel {
         this.http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
     }
 
-    public static long consumeLastPromptTokens() { return lastPromptTokens.getAndSet(0); }
-    public static long consumeLastCompletionTokens() { return lastCompletionTokens.getAndSet(0); }
-    public static String consumeLastSource() { String s = lastSource; lastSource = "estimated"; return s; }
+    public static long consumeLastPromptTokens() {
+        TokenContext.Usage u = TokenContext.consume();
+        if (u != null) return u.promptTokens();
+        return lastPromptTokens.getAndSet(0);
+    }
+    public static long consumeLastCompletionTokens() {
+        // paired with prompt consume; if TokenContext already consumed, return 0 to avoid double-count
+        TokenContext.Usage u = TokenContext.consume();
+        if (u != null) return u.completionTokens();
+        return lastCompletionTokens.getAndSet(0);
+    }
+    public static String consumeLastSource() {
+        TokenContext.Usage u = TokenContext.consume();
+        if (u != null) return u.source();
+        String s = lastSource; lastSource = "estimated"; return s;
+    }
+    public static TokenContext.Usage consumeUsage() {
+        TokenContext.Usage u = TokenContext.consume();
+        if (u != null) return u;
+        long p = lastPromptTokens.getAndSet(0);
+        long c = lastCompletionTokens.getAndSet(0);
+        String s = lastSource; lastSource = "estimated";
+        if (p == 0 && c == 0) return null;
+        return new TokenContext.Usage((int) p, (int) c, s);
+    }
 
     @Override
     public ChatResponse call(Prompt prompt) {
@@ -101,6 +124,7 @@ public class MuseSparkChatModel implements ChatModel {
                     if (ct > 0) { completionTokens = ct; source = "actual"; }
                 }
             } catch (Exception ignored) {}
+            TokenContext.set(promptTokens, completionTokens, source);
             lastPromptTokens.set(promptTokens);
             lastCompletionTokens.set(completionTokens);
             lastSource = source;
@@ -216,9 +240,11 @@ public class MuseSparkChatModel implements ChatModel {
                 });
                 long pt = promptTok.get() > 0 ? promptTok.get() : estimateTokens(input);
                 long ct = completionTok.get();
+                String src = promptTok.get() > 0 ? "actual" : "estimated";
+                TokenContext.set((int) pt, (int) ct, src);
                 lastPromptTokens.set(pt);
                 lastCompletionTokens.set(ct);
-                lastSource = promptTok.get() > 0 ? "actual" : "estimated";
+                lastSource = src;
                 log.info("muse stream model={} promptTokens~{} completionTokens~{} source={}", model, pt, ct, lastSource);
                 sink.complete();
             } catch (Exception e) {

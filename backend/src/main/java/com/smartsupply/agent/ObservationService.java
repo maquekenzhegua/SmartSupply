@@ -5,21 +5,29 @@ import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 
-/**
- * 观测：链路与 Token/成本统计，Prometheus 可抓取，日志可回溯。
- * 成本分 estimated(离线Mock) / actual(模型 usage 回填)，TTFT 单独计时，面试可指着 /actuator/prometheus 现场对账。
- */
 @Service
 public class ObservationService {
 
     private static final Logger log = LoggerFactory.getLogger(ObservationService.class);
     private final MeterRegistry registry;
+    private final JdbcTemplate jdbc;
+    private final ExecutorService persistPool;
 
-    public ObservationService(MeterRegistry registry) { this.registry = registry; }
+    public ObservationService(MeterRegistry registry, JdbcTemplate jdbc) {
+        this.registry = registry;
+        this.jdbc = jdbc;
+        this.persistPool = new ThreadPoolExecutor(2, 4, 60, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(1000), r -> {
+                    Thread t = new Thread(r, "obs-persist");
+                    t.setDaemon(true);
+                    return t;
+                }, new ThreadPoolExecutor.CallerRunsPolicy());
+    }
 
     public void recordChat(String agentType, String mode, long latencyMs, int promptTokens, int completionTokens, double costUsd, String traceId) {
         recordChat(agentType, mode, latencyMs, promptTokens, completionTokens, costUsd, traceId, "estimated");
@@ -66,4 +74,46 @@ public class ObservationService {
     }
 
     public MeterRegistry getRegistry() { return registry; }
+
+    // ---- persistent observability (async, never block request) ----
+
+    public long insertRun(String traceId, String username, Long userId, String sessionId, String agentType, String mode, String model) {
+        try {
+            String sql = "INSERT INTO agent_run(trace_id, user_id, username, session_id, agent_type, mode, status, model) VALUES (?,?,?,?,?,?,?,?)";
+            jdbc.update(sql, traceId, userId, username, sessionId, agentType, mode, "RUNNING", model);
+            Long id = jdbc.queryForObject("SELECT MAX(id) FROM agent_run WHERE trace_id=?", Long.class, traceId);
+            return id == null ? -1 : id;
+        } catch (Exception e) {
+            log.warn("insertRun failed: {}", e.toString());
+            return -1;
+        }
+    }
+
+    public void completeRun(long runId, String status, long latencyMs, Long ttfbMs, int promptTokens, int completionTokens, double costUsd, String tokenSource, String errorMsg) {
+        int total = promptTokens + completionTokens;
+        persistPool.execute(() -> {
+            try {
+                jdbc.update("UPDATE agent_run SET status=?, latency_ms=?, ttfb_ms=?, prompt_tokens=?, completion_tokens=?, total_tokens=?, cost_usd=?, token_source=?, error_msg=? WHERE id=?",
+                        status, (int) latencyMs, ttfbMs == null ? null : ttfbMs.intValue(), promptTokens, completionTokens, total, costUsd, tokenSource, errorMsg, runId);
+            } catch (Exception e) { log.warn("completeRun failed runId={}: {}", runId, e.toString()); }
+        });
+    }
+
+    public void insertStep(long runId, int seq, String node, String name, String inputDigest, String outputDigest, long latencyMs, boolean success) {
+        persistPool.execute(() -> {
+            try {
+                jdbc.update("INSERT INTO agent_step(run_id, seq, node, name, input_digest, output_digest, latency_ms, success) VALUES (?,?,?,?,?,?,?,?)",
+                        runId, seq, node, name, inputDigest, outputDigest, (int) latencyMs, success);
+            } catch (Exception e) { log.warn("insertStep failed: {}", e.toString()); }
+        });
+    }
+
+    public void insertToolCall(long runId, Long stepId, String tool, String argsJson, String resultDigest, boolean success, long latencyMs, String userRole) {
+        persistPool.execute(() -> {
+            try {
+                jdbc.update("INSERT INTO agent_tool_call(run_id, step_id, tool, args_json, result_digest, success, latency_ms, user_role) VALUES (?,?,?,?,?,?,?,?)",
+                        runId, stepId, tool, argsJson, resultDigest, success, (int) latencyMs, userRole);
+            } catch (Exception e) { log.warn("insertToolCall failed: {}", e.toString()); }
+        });
+    }
 }

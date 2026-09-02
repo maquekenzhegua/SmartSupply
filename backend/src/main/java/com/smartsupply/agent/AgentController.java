@@ -5,6 +5,8 @@ import com.smartsupply.agent.rag.RagService;
 import com.smartsupply.common.RateLimit;
 import com.smartsupply.common.Result;
 import com.smartsupply.common.TraceIdFilter;
+import com.smartsupply.common.CurrentUser;
+import com.smartsupply.common.TokenContext;
 import com.smartsupply.config.MuseSparkChatModel;
 import com.smartsupply.config.PromptRegistry;
 import org.slf4j.MDC;
@@ -40,6 +42,7 @@ public class AgentController {
     private final ObservationService observation;
     private final PromptGuard guard;
     private final TokenEstimator tokenEstimator;
+    private final org.springframework.jdbc.core.JdbcTemplate jdbc;
     private final ExecutorService sseExecutor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "agent-sse");
         t.setDaemon(true);
@@ -52,7 +55,7 @@ public class AgentController {
                            com.smartsupply.agent.tools.ContractTools contractTools,
                            com.smartsupply.agent.tools.CatalogTools catalogTools,
                            PythonSidecarService pythonSidecar, PromptRegistry prompts, ObservationService observation,
-                           PromptGuard guard, TokenEstimator tokenEstimator) {
+                           PromptGuard guard, TokenEstimator tokenEstimator, org.springframework.jdbc.core.JdbcTemplate jdbc) {
         this.chatClient = chatClient;
         this.ragService = ragService;
         this.memory = memory;
@@ -65,6 +68,7 @@ public class AgentController {
         this.observation = observation;
         this.guard = guard;
         this.tokenEstimator = tokenEstimator;
+        this.jdbc = jdbc;
     }
 
     @PostMapping("/chat")
@@ -90,6 +94,8 @@ public class AgentController {
         String systemPrompt = prompts.contentFor(agentType);
         String promptVersion = prompts.versionFor(agentType);
         String traceId = MDC.get(TraceIdFilter.TRACE_ID);
+        if (traceId == null || traceId.isBlank()) traceId = com.smartsupply.common.TraceContext.get();
+        if (traceId == null) traceId = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 16);
         String ragContext = "";
         RagService.RecallDetail detail = null;
         if ("contract".equals(agentType) || message.contains("合同") || message.contains("风控") || message.contains("风险")) {
@@ -98,6 +104,10 @@ public class AgentController {
         }
         List<Message> history = memory.load(sessionId, systemPrompt);
         String userContent = guard.wrapUserContent(message, ragContext);
+        // persistent run
+        Long uid = null; try { uid = jdbc.queryForObject("SELECT id FROM sys_user WHERE username=?", Long.class, user); } catch (Exception ignored) {}
+        String modelName = prompts.versionFor(agentType);
+        long runId = observation.insertRun(traceId, user, uid, sessionId, agentType, "java-direct", modelName);
         boolean useDeep = "deep".equals(agentType) || "true".equalsIgnoreCase(body.getOrDefault("useDeep", "false"));
         if (useDeep && pythonSidecar.isEnabled()) {
             List<Map<String, String>> msgs = new ArrayList<>();
@@ -109,16 +119,30 @@ public class AgentController {
                 msgs.add(Map.of("role", role, "content", txt));
             }
             msgs.add(Map.of("role", "user", "content", userContent));
-            String deepReply = pythonSidecar.reason(msgs, agentType, sessionId);
-            if (deepReply != null && !deepReply.isBlank()) {
+            long sidecarStart = System.currentTimeMillis();
+            PythonSidecarService.SidecarResult sr = pythonSidecar.reasonStructured(msgs, agentType, sessionId);
+            if (sr != null && sr.reply() != null && !sr.reply().isBlank()) {
+                String deepReply = sr.reply();
                 memory.append(sessionId, "user", message, user);
                 memory.append(sessionId, "assistant", deepReply, user);
                 int promptTokens = tokenEstimator.estimate(systemPrompt + userContent + history.size() * 200);
                 int completionTokens = tokenEstimator.estimate(deepReply);
                 double cost = tokenEstimator.estimateCostUsd(promptTokens, completionTokens);
-                observation.recordChat(agentType, "python-deep", System.currentTimeMillis() - start, promptTokens, completionTokens, cost, traceId, "estimated");
+                long lat = System.currentTimeMillis() - start;
+                observation.recordChat(agentType, "python-deep", lat, promptTokens, completionTokens, cost, traceId, "estimated");
+                if (runId > 0) {
+                    observation.completeRun(runId, "SUCCESS", lat, null, promptTokens, completionTokens, cost, "estimated", null);
+                    observation.insertStep(runId, 1, "llm", "python-sidecar", sha(systemPrompt), sha(deepReply), System.currentTimeMillis() - sidecarStart, true);
+                    int seq = 2;
+                    for (Map<String, Object> tr : sr.trace()) {
+                        observation.insertStep(runId, seq++, String.valueOf(tr.getOrDefault("node", "step")), String.valueOf(tr.getOrDefault("name", "")), null, null, 0, true);
+                    }
+                    for (Map<String, Object> tcr : sr.toolResults()) {
+                        observation.insertToolCall(runId, null, String.valueOf(tcr.getOrDefault("tool", "tool")), String.valueOf(tcr.get("args")), sha(String.valueOf(tcr.get("result"))), true, 0, CurrentUser.roles().isEmpty() ? "" : CurrentUser.roles().get(0));
+                    }
+                }
                 if (detail != null) observation.recordRag(detail.latencyMs(), detail.reranked());
-                return Result.ok(Map.of("reply", deepReply, "agentType", agentType, "sessionId", sessionId, "mode", "python-deep", "via", "langgraph", "promptVersion", promptVersion, "traceId", traceId == null ? "" : traceId, "flagged", flagged, "tokenSource", "estimated"));
+                return Result.ok(Map.of("reply", deepReply, "agentType", agentType, "sessionId", sessionId, "mode", "python-deep", "via", "langgraph", "promptVersion", promptVersion, "traceId", traceId, "flagged", flagged, "tokenSource", "estimated", "runId", runId));
             }
         }
         var spec = chatClient.prompt().system(systemPrompt);
@@ -129,35 +153,49 @@ public class AgentController {
         com.smartsupply.agent.tools.ToolSecurity.beginToolTrace();
         String reply;
         List<String> usedTools;
+        long llmStart = System.currentTimeMillis();
         try {
             reply = spec.user(userContent)
                     .tools(inventoryTools, purchaseTools, contractTools, catalogTools)
                     .call().content();
         } finally {
-            // 即使工具抛异常也要结束本次追踪，避免 ThreadLocal 泄漏到线程池复用的下一个请求
             usedTools = com.smartsupply.agent.tools.ToolSecurity.endToolTrace();
         }
         reply = enforceCitation(reply, ragContext);
         memory.append(sessionId, "user", message, user);
-        memory.append(sessionId, "assistant", reply == null ? "" : reply, user);
-        // 优先用模型 usage 回填 actual，否则用估算 estimated
+        // persist tool calls json
+        try {
+            if (!usedTools.isEmpty()) {
+                Long sid = jdbc.queryForObject("SELECT id FROM chat_session WHERE title=? ORDER BY id DESC LIMIT 1", Long.class, sessionId);
+                if (sid != null) {
+                    String toolJson = new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(usedTools);
+                    jdbc.update("UPDATE chat_message SET tool_calls_json=? WHERE session_id=? AND role='assistant' ORDER BY id DESC LIMIT 1", toolJson, sid);
+                }
+            }
+        } catch (Exception ignored) {}
+        TokenContext.Usage usage = MuseSparkChatModel.consumeUsage();
         int promptTokens;
         int completionTokens;
         String tokenSource;
-        long pt = MuseSparkChatModel.consumeLastPromptTokens();
-        long ct = MuseSparkChatModel.consumeLastCompletionTokens();
-        String src = MuseSparkChatModel.consumeLastSource();
-        if (pt > 0 || ct > 0) {
-            promptTokens = pt > 0 ? (int) pt : tokenEstimator.estimate(systemPrompt + userContent + history.size() * 200);
-            completionTokens = ct > 0 ? (int) ct : tokenEstimator.estimate(reply == null ? "" : reply);
-            tokenSource = src;
+        if (usage != null) {
+            promptTokens = usage.promptTokens() > 0 ? usage.promptTokens() : tokenEstimator.estimate(systemPrompt + userContent + history.size() * 200);
+            completionTokens = usage.completionTokens() > 0 ? usage.completionTokens() : tokenEstimator.estimate(reply == null ? "" : reply);
+            tokenSource = usage.source();
         } else {
             promptTokens = tokenEstimator.estimate(systemPrompt + userContent + history.size() * 200);
             completionTokens = tokenEstimator.estimate(reply == null ? "" : reply);
             tokenSource = "estimated";
         }
         double cost = tokenEstimator.estimateCostUsd(promptTokens, completionTokens);
-        observation.recordChat(agentType, "java-direct", System.currentTimeMillis() - start, promptTokens, completionTokens, cost, traceId, tokenSource);
+        long latency = System.currentTimeMillis() - start;
+        observation.recordChat(agentType, "java-direct", latency, promptTokens, completionTokens, cost, traceId, tokenSource);
+        if (runId > 0) {
+            observation.completeRun(runId, "SUCCESS", latency, null, promptTokens, completionTokens, cost, tokenSource, null);
+            observation.insertStep(runId, 1, "llm", "java-direct", sha(systemPrompt + userContent), sha(reply), System.currentTimeMillis() - llmStart, true);
+            for (String tname : usedTools) {
+                observation.insertToolCall(runId, null, tname, "{}", sha(tname), true, 0, CurrentUser.roles().isEmpty() ? "" : CurrentUser.roles().get(0));
+            }
+        }
         if (detail != null) observation.recordRag(detail.latencyMs(), detail.reranked());
         Map<String, Object> data = new java.util.HashMap<>();
         data.put("reply", reply == null ? "" : reply);
@@ -171,6 +209,7 @@ public class AgentController {
         data.put("promptTokens", promptTokens);
         data.put("completionTokens", completionTokens);
         data.put("tools", usedTools);
+        data.put("runId", runId);
         return Result.ok(data);
     }
 
@@ -354,5 +393,15 @@ public class AgentController {
         if (hint.contains("无召回")) return reply;
         String snippet = ragContext.length() > 120 ? ragContext.substring(0, 120).replace("\n", " ") + "..." : ragContext.replace("\n", " ");
         return reply + "\n\n[引用] 依据 knowledge 召回: " + snippet;
+    }
+
+    private static String sha(String s) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] h = md.digest((s == null ? "" : s).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < 8; i++) sb.append(String.format("%02x", h[i]));
+            return sb.toString();
+        } catch (Exception e) { return String.valueOf(s == null ? 0 : s.length()); }
     }
 }
