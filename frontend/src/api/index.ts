@@ -41,4 +41,11 @@ export const api = {
     return request.post('/contracts/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } }).then(r => r.data.data || r.data)
   },
   riskReport: (id: number) => request.get(`/contracts/${id}/risk-report`).then(r => r.data.data || r.data),
+  adminRuns: (params: Record<string, unknown>) => request.get('/admin/agent/runs', { params }).then(r => r.data.data || r.data),
+  adminRunDetail: (id: number) => request.get(`/admin/agent/runs/${id}`).then(r => r.data.data || r.data),
+  adminCosts: (params: Record<string, unknown>) => request.get('/admin/agent/costs', { params }).then(r => r.data.data || r.data),
+  adminPrompts: () => request.get('/admin/agent/prompts').then(r => r.data.data || r.data),
+  adminCreatePrompt: (body: Record<string, unknown>) => request.post('/admin/agent/prompts', body).then(r => r.data.data || r.data),
+  adminActivatePrompt: (id: number) => request.post(`/admin/agent/prompts/${id}/activate`).then(r => r.data.data || r.data),
+  adminEval: () => request.get('/admin/agent/eval').then(r => r.data.data || r.data),
 }

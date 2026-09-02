@@ -20,6 +20,10 @@ const router = createRouter({
         { path: 'purchase', component: () => import('@/views/Purchase.vue') },
         { path: 'knowledge', component: () => import('@/views/Knowledge.vue') },
         { path: 'agent', component: () => import('@/views/AgentWorkspace.vue') },
+        { path: 'admin/runs', component: () => import('@/views/admin/Runs.vue'), meta: { requiresAdmin: true } },
+        { path: 'admin/costs', component: () => import('@/views/admin/Costs.vue'), meta: { requiresAdmin: true } },
+        { path: 'admin/prompts', component: () => import('@/views/admin/Prompts.vue'), meta: { requiresAdmin: true } },
+        { path: 'admin/eval', component: () => import('@/views/admin/Eval.vue'), meta: { requiresAdmin: true } },
       ],
     },
   ],
@@ -27,8 +31,10 @@ const router = createRouter({
 
 router.beforeEach((to) => {
   const token = localStorage.getItem('token')
+  const role = localStorage.getItem('role')
   if (to.path !== '/login' && !token) return '/login'
   if (to.path === '/login' && token) return '/'
+  if ((to as any).meta?.requiresAdmin && role !== 'ADMIN') return '/dashboard'
 })
 
 export default router

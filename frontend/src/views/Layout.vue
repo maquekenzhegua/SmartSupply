@@ -15,6 +15,13 @@
         <el-menu-item index="/purchase">采购单</el-menu-item>
         <el-menu-item index="/knowledge">知识库</el-menu-item>
         <el-menu-item index="/agent">Agent 工作台</el-menu-item>
+        <el-sub-menu v-if="auth.role==='ADMIN'" index="admin">
+          <template #title>治理后台</template>
+          <el-menu-item index="/admin/runs">Runs</el-menu-item>
+          <el-menu-item index="/admin/costs">成本</el-menu-item>
+          <el-menu-item index="/admin/prompts">Prompts</el-menu-item>
+          <el-menu-item index="/admin/eval">评测</el-menu-item>
+        </el-sub-menu>
       </el-menu>
       <div style="position: absolute; bottom: 12px; left: 16px; right: 16px; display: flex; gap: 8px">
         <el-button size="small" @click="askAgent">Ask Agent</el-button>

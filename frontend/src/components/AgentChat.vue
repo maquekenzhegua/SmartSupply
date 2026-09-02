@@ -46,6 +46,7 @@
 <script setup lang="ts">
 import { ref, nextTick, onMounted, computed, watch } from 'vue'
 import { marked } from 'marked'
+import { ElMessage } from 'element-plus'
 import { api } from '@/api'
 import request from '@/utils/request'
 
