@@ -1,0 +1,14 @@
+{"id": "traj-001", "question": "哪些 SKU 低于安全库存需要补货", "expected_tools": ["list_low_stock"], "acceptable_tools": ["list_low_stock", "get_inventory"], "note": "库存缺口盘点"}
+{"id": "traj-002", "question": "列出所有供应商", "expected_tools": ["list_suppliers"], "acceptable_tools": ["list_suppliers"], "note": "供应商名单"}
+{"id": "traj-003", "question": "搜索包含违约金的合同", "expected_tools": ["search_contracts"], "acceptable_tools": ["search_contracts", "search_knowledge"], "note": "合同关键词检索"}
+{"id": "traj-004", "question": "知识库里的采购制度条款有哪些", "expected_tools": ["search_knowledge"], "acceptable_tools": ["search_knowledge"], "note": "知识库语义检索（措辞避开合同/风控词，避免与 search_contracts 混淆）"}
+{"id": "traj-005", "question": "搜索 T恤 商品", "expected_tools": ["search_catalog"], "acceptable_tools": ["search_catalog"], "note": "商品目录检索"}
+{"id": "traj-006", "question": "你好，今天能帮我做什么", "expected_tools": [], "acceptable_tools": [], "note": "寒暄不应触发任何工具（误调度检查）"}
+{"id": "traj-007", "question": "帆布托特包有哪些规格", "expected_tools": ["search_catalog"], "acceptable_tools": ["search_catalog"], "note": "SKU 规格查询走目录"}
+{"id": "traj-008", "question": "供应商列表里有哪些工厂", "expected_tools": ["list_suppliers"], "acceptable_tools": ["list_suppliers"], "note": "供应商名单"}
+{"id": "traj-009", "question": "查一下合同风险评级", "expected_tools": ["search_contracts"], "acceptable_tools": ["search_contracts", "get_contract_risk", "search_knowledge"], "note": "风险类问法允许多种取证路径"}
+{"id": "traj-010", "question": "知识库中关于验收标准的规定是什么", "expected_tools": ["search_knowledge"], "acceptable_tools": ["search_knowledge"], "note": "知识库语义检索"}
+{"id": "traj-011", "question": "补货清单有哪些", "expected_tools": ["list_low_stock"], "acceptable_tools": ["list_low_stock"], "note": "补货缺口"}
+{"id": "traj-012", "question": "T恤相关商品搜索一下", "expected_tools": ["search_catalog"], "acceptable_tools": ["search_catalog", "get_inventory", "list_low_stock"], "note": "商品搜索为主，允许附带库存取证"}
+{"id": "traj-013", "question": "查一下 SKU-T001-WH-M 的库存情况", "expected_tools": ["get_inventory"], "acceptable_tools": ["get_inventory", "list_low_stock"], "note": "单 SKU 库存：真实模型应首选 get_inventory，Mock 启发式走 list_low_stock 也计入"}
+{"id": "traj-014", "question": "保温杯的商品目录里有吗", "expected_tools": ["search_catalog"], "acceptable_tools": ["search_catalog"], "note": "目录检索"}

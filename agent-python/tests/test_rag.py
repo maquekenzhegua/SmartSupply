@@ -1,4 +1,4 @@
-"""
+r"""
 RAG 回归（落到 D:\conda_envs\ai-backend 可跑，无需真实 LLM/PG）：
 - 切分：800/100 中文友好
 - 本地向量：chromadb 内存集合 + 归一化伪向量（与 Java MockEmbeddingModel 一致语义）
@@ -57,36 +57,34 @@ def test_chromadb_local_vector_roundtrip():
     assert len(res2["documents"][0]) == 1
 
 
-def test_ragas_import_available_on_ai_backend_env():
-    pytest.importorskip("ragas")
-    pytest.importorskip("datasets")
-    import ragas
-    from datasets import Dataset
+def test_fastapi_rag_recall_forwards_to_java(monkeypatch):
+    """召回端点已改为真实转发：成功路径透传 Java context/citations，不再返回占位假文案。"""
+    from app import tools as T
 
-    assert ragas.__version__  # 已装到 D:\conda_envs\ai-backend
-    ds = Dataset.from_dict({"question": ["什么是无限连带责任"], "answer": ["禁止"], "contexts": [["禁止无限连带责任"]]})
-    assert len(ds) == 1
+    async def fake(path, method="GET", params=None, json=None, timeout_s=8.0):
+        assert path == "/api/knowledge/recall"
+        return {"context": "禁止无限连带责任", "citations": [{"docId": 1, "title": "风控规范"}],
+                "vectorHits": 3, "reranked": 2}
 
-
-def test_fastapi_rag_recall_placeholder_status():
+    monkeypatch.setattr(T, "call_java_tool", fake)
     c = TestClient(app)
     r = c.post("/api/rag/recall", json={"query": "无限连带责任"})
     assert r.status_code == 200
     data = r.json()
-    assert "query" in data and "context" in data
-    assert "无限连带责任" in data["query"]
+    assert data["context"] == "禁止无限连带责任"
+    assert data["citations"][0]["title"] == "风控规范"
 
 
-def test_sentence_transformers_import_available():
-    pytest.importorskip("sentence_transformers")
-    import sentence_transformers
+def test_java_recall_unreachable_reports_502_not_fake(monkeypatch):
+    """Java 不可达时如实 502 + degraded，绝不返回编造的 context 冒充召回结果。"""
+    from app import tools as T
 
-    assert sentence_transformers.__version__
+    async def boom(*a, **k):
+        raise RuntimeError("connection refused")
 
-
-def test_java_rag_is_authoritative_note():
-    """Python 侧召回为占位，权威召回在 Java RagService + MockEmbedding + H2/pgvector，此单测只保证占位不回归为空。"""
+    monkeypatch.setattr(T, "call_java_tool", boom)
     c = TestClient(app)
     r = c.post("/api/rag/recall", json={"query": "违约金 30%"})
-    assert r.status_code == 200
-    assert r.json()["context"]  # 非空占位
+    assert r.status_code == 502
+    body = r.json()
+    assert body["degraded"] is True and "connection refused" in body["error"]

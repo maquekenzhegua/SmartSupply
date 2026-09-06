@@ -1,9 +1,9 @@
 """
-Golden RAG 量化评估：离线可跑、无真实 LLM/PG，输出 STAR 可写的数据。
+Golden RAG 量化评估：离线可跑、无真实 LLM/PG。
 - 数据集：tests/golden_rag.jsonl 20条（合同风控/库存/采购/SupplyChain 业务全覆盖）
 - 指标：规则版 faithfulness / context_recall / answer命中率 + 关键词命中率，数值为 0..1
 - 同时校验 Java RAG 的关键词召回路径（RagService 参数化 ILIKE 兜底）与 Python 侧占位一致性
-- 面试可讲：离线先用规则指标回归，真 LLM 接入后同数据集跑 ragas 的 faithfulness/context_precision
+- 演进路径：离线先用规则指标回归，真 LLM 接入后同数据集跑 LLM-as-judge（scripts/llm_judge.py --mode real）
 """
 import json
 import os
@@ -177,24 +177,23 @@ def test_faithfulness_proxy_not_hallucinating():
     print(f"[GoldenEval] avg_faithfulness_proxy={avg_fh:.3f}")
     assert avg_fh >= 0.55
 
-def test_ragas_import_still_available():
-    pytest.importorskip("ragas")
-    pytest.importorskip("datasets")
-    import ragas
-    from datasets import Dataset
-    assert ragas.__version__
-    ds = Dataset.from_dict({"question": ["测试"], "answer": ["禁止无限连带"], "contexts": [["禁止无限连带责任"]]})
-    assert len(ds) == 1
 
-def test_fastapi_recall_not_empty_for_golden_questions():
+def test_fastapi_recall_honest_when_java_down(monkeypatch):
+    """召回端点转发 Java：离线（Java 不可达）必须 502+degraded，不得返回占位假 context。"""
     from fastapi.testclient import TestClient
     from app.main import app
+    from app import tools as T
+
+    async def boom(*a, **k):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(T, "call_java_tool", boom)
     c = TestClient(app)
     rows = load_golden()
-    for r in rows[:5]:
+    for r in rows[:3]:
         resp = c.post("/api/rag/recall", json={"query": r["question"]})
-        assert resp.status_code == 200
-        assert resp.json()["context"], f"召回为空 {r['question']}"
+        assert resp.status_code == 502, f"Java 不可达时必须显式 502：{r['question']}"
+        assert resp.json().get("degraded") is True
 
 
 # ---------------------------------------------------------------------------

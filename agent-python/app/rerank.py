@@ -1,4 +1,12 @@
-"""双轨重排：离线 BM25 + 可选 cross-encoder，自动回退，面试可讲 trade-off。"""
+"""双轨重排：离线词面打分 + 可选 cross-encoder，自动回退。
+
+诚实命名：_bm25_score 并非标准 BM25（无 IDF、无语料统计），是带长度归一的词面启发式，
+与 Java Reranker 保持同构；命名保留 bm25 仅为两侧口径对齐。
+cross-encoder 默认 BAAI/bge-reranker-base（中文友好，可经 RERANK_CROSS_MODEL 覆盖）；
+权重下载失败自动回退词面打分，回退事实必须体现在返回的 fallback 字段供调用方甄别。
+"""
+import math
+import os
 from typing import List, Dict, Any
 import re
 
@@ -34,8 +42,7 @@ def _bm25_like(query: str, content: str) -> float:
                     tf = 1
                     break
         if tf > 0:
-            score += __import__("math").log(1 + tf) * (1 + __import__("math").log(1 + len(content) / 100.0))
-    import math
+            score += math.log(1 + tf) * (1 + math.log(1 + len(content) / 100.0))
     len_norm = 1.0 / (1 + math.exp((len(c_terms) - 400) / 200.0))
     return score * (0.5 + len_norm)
 
@@ -55,7 +62,7 @@ def _bm25_score(query: str, doc: Dict[str, Any]) -> float:
     coverage = _keyword_coverage(query, content)
     return bm25 * 0.6 + coverage * 0.4 + title_boost
 
-# 可选 cross-encoder：懒加载，缺依赖自动回退
+# 可选 cross-encoder：懒加载，缺依赖/缺权重自动回退
 _cross_model = None
 _cross_failed = False
 
@@ -65,8 +72,9 @@ def _try_load_cross():
         return _cross_model
     try:
         from sentence_transformers import CrossEncoder  # type: ignore
-        # 轻量中文友好模型，离线无权重时会在首次下载，失败则回退 BM25
-        _cross_model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+        # 中文友好重排模型；首次使用会下载权重，离线/失败则回退词面打分
+        model_name = os.getenv("RERANK_CROSS_MODEL", "BAAI/bge-reranker-base")
+        _cross_model = CrossEncoder(model_name)
         return _cross_model
     except Exception:
         _cross_failed = True
@@ -77,7 +85,7 @@ def rerank(query: str, docs: List[Dict[str, Any]], top_k: int = 4, mode: str = "
         return {"reranked": [], "mode": "none", "fallback": False}
     use_cross = mode in ("cross-encoder", "auto")
     cross = _try_load_cross() if use_cross else None
-    if cross is not None and mode in ("cross-encoder", "auto"):
+    if cross is not None and use_cross:
         try:
             pairs = [(query, d.get("content") or d.get("text") or "") for d in docs]
             scores = cross.predict(pairs)  # type: ignore
@@ -85,19 +93,14 @@ def rerank(query: str, docs: List[Dict[str, Any]], top_k: int = 4, mode: str = "
             scored.sort(key=lambda x: float(x[1]), reverse=True)
             top = [d for d, _ in scored[:top_k]]
             return {"reranked": top, "mode": "cross-encoder", "fallback": False, "scores": [float(s) for _, s in scored[:top_k]]}
-        except Exception as e:
-            # cross 失败，回退 BM25
-            if mode == "cross-encoder":
-                # 显式要求 cross 时也回退，但标记 fallback
-                pass
-            else:
-                pass
-            fallback = True
+        except Exception:
+            # predict 阶段失败同样属于回退：此前未标记，调用方会误以为结果来自 cross-encoder
+            global _cross_failed
+            _cross_failed = True
             cross = None
-        else:
-            fallback = False
-    # BM25 回退
+    # 词面打分路径（cross 未配置 / 加载失败 / 推理失败）
+    fell_back = bool(use_cross and _cross_failed)
     scored = [(d, _bm25_score(query, d)) for d in docs]
     scored.sort(key=lambda x: x[1], reverse=True)
     top = [d for d, _ in scored[:top_k]]
-    return {"reranked": top, "mode": "bm25", "fallback": bool(cross is None and use_cross and _cross_failed), "scores": [float(s) for _, s in scored[:top_k]]}
+    return {"reranked": top, "mode": "bm25", "fallback": fell_back, "scores": [float(s) for _, s in scored[:top_k]]}
