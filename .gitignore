@@ -25,6 +25,10 @@ Thumbs.db
 
 # Eval reports with secrets - keep mock baseline, ignore real LLM reports with raw outputs
 docs/eval-report-real-*.md
+# 完整真实评测报告含模型原始输出，不入库；脱敏汇总版（仅聚合指标+数值表）放行提交
+!docs/eval-report-real-summary.md
+# CI eval 运行产物（llm_judge.py 相对路径以 agent-python/ 为根解析）
+agent-python/docs/
 
 # Frontend
 frontend/dist/
@@ -32,3 +36,6 @@ frontend/node_modules/
 
 # Backend
 backend/target/
+
+# HITL 演练临时文件（thread_id 落盘）
+agent-python/.hitl_drill_thread

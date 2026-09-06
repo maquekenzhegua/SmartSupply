@@ -11,8 +11,11 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      # 单一事实源：直接执行 Flyway 迁移目录（按文件名顺序 V1→V2→...），不再有第二套 schema
-      - ./backend/src/main/resources/db/migration:/docker-entrypoint-initdb.d:ro
+      # schema 单一事实源 = 应用内 Flyway（enabled: true，应用启动自建/迁移表）。
+      # 此处只挂辅助库初始化目录（幂等创建 langfuse 独立库，仅首次初始化卷时执行）。
+      # 注意：不能把单个 .sh 挂进整目录挂载的 /docker-entrypoint-initdb.d —— Docker 需在
+      # 只读挂载内创建挂载点，必然报 "read-only file system"（实测踩坑）。
+      - ./deploy/postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dev} -d ${POSTGRES_DB:-smartsupply}"]
       interval: 5s
@@ -27,6 +30,61 @@ services:
     volumes:
       - redisdata:/data
 
+  # 本地演示可选：深度推理边车（后端需同时 AGENT_PYTHON_ENABLED=true 才会启用）
+  agent-python:
+    build: ./agent-python
+    container_name: smartsupply-agent-python
+    profiles: ["deep"]
+    environment:
+      JAVA_API_BASE: http://host.docker.internal:8080
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      AI_MODEL: ${AI_MODEL:-gpt-4o-mini}
+      SIDECAR_USERNAME: ${SIDECAR_USERNAME:-admin}
+      SIDECAR_PASSWORD: ${SIDECAR_PASSWORD:-admin123}
+      # 可观测性（可选）：配置 LANGFUSE_* 后一次 agent 运行 = 一条 trace（含 plan/tool/reasoner 埋点）
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-http://localhost:3000}
+      # 写闸门（interrupt）挂起状态持久化：缺省进程内 MemorySaver（重启即丢挂起 run）；
+      # 指向 Postgres 后重启/多实例仍可恢复待审批的写操作。checkpoint_* 表由边车 setup() 幂等建表
+      CHECKPOINT_URI: ${CHECKPOINT_URI:-postgresql://${POSTGRES_USER:-dev}:${POSTGRES_PASSWORD:-change-me-strong-password}@postgres:5432/smartsupply}
+    ports:
+      - "8001:8001"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # 本地演示可选：Langfuse trace 平台（profile "obs"，docker compose --profile obs up -d langfuse）
+  # headless 初始化（https://langfuse.com/self-hosting/administration/headless-initialization）：
+  # 首次启动自动建 org/project/user/密钥（幂等，已存在则跳过），无需手工注册；
+  # 演示密钥为本地固定值（与 .env.example 注释一致），真实环境请换强随机值
+  langfuse:
+    image: langfuse/langfuse:2
+    container_name: smartsupply-langfuse
+    profiles: ["obs"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-dev}:${POSTGRES_PASSWORD:-change-me-strong-password}@postgres:5432/langfuse
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-change-me-langfuse-nextauth-secret}
+      SALT: ${LANGFUSE_SALT:-change-me-langfuse-salt}
+      TELEMETRY_ENABLED: "false"
+      LANGFUSE_INIT_ORG_ID: smartsupply
+      LANGFUSE_INIT_ORG_NAME: SmartSupply
+      LANGFUSE_INIT_PROJECT_ID: smartsupply-agent
+      LANGFUSE_INIT_PROJECT_NAME: smartsupply-agent
+      LANGFUSE_INIT_USER_EMAIL: demo@smartsupply.local
+      LANGFUSE_INIT_USER_NAME: demo
+      LANGFUSE_INIT_USER_PASSWORD: smartsupply-demo
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-lf-smartsupply-local}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-lf-smartsupply-local}
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
   pgdata:

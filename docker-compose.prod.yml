@@ -1,27 +1,34 @@
+# 生产编排：只有 nginx 对外暴露 80；PG/Redis/边车均在内部网络，不发布端口。
+# 密钥不设默认值（:? 语法缺省即启动失败），从 .env 注入（参见 .env.example）。
 services:
   postgres:
     image: pgvector/pgvector:pg16
+    restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-smartsupply}
       POSTGRES_USER: ${POSTGRES_USER:-dev}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-strong-password}
-    ports: ["5432:5432"]
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./backend/src/main/resources/db/migration:/docker-entrypoint-initdb.d:ro
+      # schema 单一事实源 = 应用内 Flyway；此处只挂辅助库初始化目录（幂等创建 langfuse 库）。
+      # 单文件挂进整目录挂载的 initdb.d 会报 read-only file system，必须整目录挂载。
+      - ./deploy/postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL","pg_isready -U ${POSTGRES_USER:-dev} -d ${POSTGRES_DB:-smartsupply}"]
       interval: 10s
       timeout: 5s
       retries: 10
+
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
     command: redis-server --appendonly yes
-    ports: ["6379:6379"]
     volumes: [redisdata:/data]
     healthcheck: { test: ["CMD","redis-cli","ping"], interval: 10s, retries: 5 }
+
   backend:
     build: ./backend
+    restart: unless-stopped
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -29,22 +36,67 @@ services:
       SPRING_PROFILES_ACTIVE: prod
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-smartsupply}
       SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-dev}
-      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-change-me-strong-password}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
       SPRING_DATA_REDIS_HOST: redis
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com}
       AI_MODEL: ${AI_MODEL:-gpt-4o-mini}
-      JWT_SECRET: ${JWT_SECRET:-change-me-32chars-minimum-secret-please}
+      AI_MOCK: ${AI_MOCK:-true}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET (>=32 chars) is required}
+      DEMO_ADMIN_PASSWORD: ${DEMO_ADMIN_PASSWORD:-}
+      DEMO_OPS_PASSWORD: ${DEMO_OPS_PASSWORD:-}
       AGENT_PYTHON_ENABLED: ${AGENT_PYTHON_ENABLED:-false}
-      AGENT_PYTHON_URL: ${AGENT_PYTHON_URL:-http://agent-python:8001}
-    ports: ["8080:8080"]
+      AGENT_PYTHON_URL: http://agent-python:8001
+      AGENT_PYTHON_API_KEY: ${AGENT_PYTHON_API_KEY:-}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost}
+      # 本拓扑：frontend nginx 是唯一可信反代，且已覆写 X-Forwarded-For=$remote_addr（不可伪造）。
+      # 必须开启，否则限流 key 全部落在 nginx 容器 IP 上，全体用户共享一个配额桶会互相锁死。
+      SMARTSUPPLY_RATELIMIT_TRUST_PROXY: "true"
+
   agent-python:
     build: ./agent-python
+    restart: unless-stopped
     environment:
       JAVA_API_BASE: http://backend:8080
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       AI_MODEL: ${AI_MODEL:-gpt-4o-mini}
-    ports: ["8001:8001"]
-    depends_on: [backend]
-volumes: { pgdata: {}, redisdata: {},  }
+      SIDECAR_USERNAME: ${SIDECAR_USERNAME:-}
+      SIDECAR_PASSWORD: ${SIDECAR_PASSWORD:-}
+      SIDECAR_API_KEY: ${SIDECAR_API_KEY:-}
+      # 可观测性（可选）：配置 LANGFUSE_* 后 trace 上报到 langfuse 服务
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-http://langfuse:3000}
+      # 写闸门（interrupt）挂起状态持久化：重启/多实例后待审批 run 仍可恢复；
+      # Postgres 不可达时边车自动降级进程内 MemorySaver 并大声告警（app/checkpointing.py）
+      CHECKPOINT_URI: postgresql://${POSTGRES_USER:-dev}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-smartsupply}
+    depends_on:
+      backend: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+
+  # 可选观测平台（profile "obs"：docker compose --profile obs up -d langfuse）。
+  # 内部网络不发布端口：演示时经 ssh -L 3000:localhost:3000 隧道访问，或在 nginx 加受保护路由。
+  # 注意：启用 obs 前必须设置 LANGFUSE_NEXTAUTH_SECRET/LANGFUSE_SALT（compose 无法按 profile 强制必填，
+  # 下方默认值仅为语法占位，切勿以默认值上线）。
+  langfuse:
+    image: langfuse/langfuse:2
+    restart: unless-stopped
+    profiles: ["obs"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-dev}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/langfuse
+      NEXTAUTH_URL: ${LANGFUSE_PUBLIC_URL:-http://localhost:3000}
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-UNSAFE-DEFAULT-only-validates-compose-syntax}
+      SALT: ${LANGFUSE_SALT:-UNSAFE-DEFAULT-only-validates-compose-syntax}
+      TELEMETRY_ENABLED: "false"
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    ports: ["80:80"]
+    depends_on:
+      backend: { condition: service_healthy }
+
+volumes: { pgdata: {}, redisdata: {} }

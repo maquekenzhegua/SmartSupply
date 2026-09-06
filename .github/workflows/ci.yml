@@ -5,10 +5,24 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      run_real_eval:
+        description: '使用仓库 Secrets 中的真实 LLM Key 跑评测'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   backend:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -16,21 +30,64 @@ jobs:
           distribution: temurin
           java-version: '17'
           cache: maven
-      - name: Backend test (mock only, no DB)
+      - name: Backend test (full offline suite: H2 + Mock, no key/DB/Redis needed)
         working-directory: backend
-        run: mvn -B test -Dtest=SqlValidatorTest,TextSplitterTest,GlobalExceptionHandlerTest,JwtServiceTest
-      - name: Backend package
-        working-directory: backend
-        run: mvn -B package -DskipTests
-      - name: Upload jar artifact
+        run: mvn -B test
+      # 真 PG 回归（Testcontainers，pgvector 镜像 + 真实 Flyway 迁移）：ubuntu runner 自带 Docker，
+      # 会真实执行；无 Docker 的本地环境由 disabledWithoutDocker 自动跳过
+      - name: Upload surefire reports on failure
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: backend-jar
-          path: backend/target/*.jar
-          retention-days: 3
+          name: surefire-reports
+          path: backend/target/surefire-reports/
+          retention-days: 7
+
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Infra (postgres + redis)
+        run: docker compose up -d postgres redis
+      - name: Backend (AI_MOCK, datasource -> compose postgres)
+        working-directory: backend
+        env:
+          SPRING_DATASOURCE_USERNAME: dev
+          SPRING_DATASOURCE_PASSWORD: change-me-strong-password
+        run: |
+          mvn -B -q package -DskipTests
+          nohup java -jar target/*.jar --server.port=8080 > backend-e2e.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf -o /dev/null http://localhost:8080/api/auth/login -X POST -H 'Content-Type: application/json' -d '{"username":"x","password":"x"}' && break || sleep 2; done
+      - name: Frontend deps + Playwright
+        working-directory: frontend
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: E2E main flow
+        working-directory: frontend
+        run: npm run e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: frontend/playwright-report/
+          retention-days: 7
 
   frontend:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -40,11 +97,19 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
         working-directory: frontend
-      - run: npm run build
+      - name: Lint
         working-directory: frontend
+        run: npm run lint
+      - name: Unit tests (vitest)
+        working-directory: frontend
+        run: npm test
+      - name: Build (vue-tsc + vite)
+        working-directory: frontend
+        run: npm run build
 
   agent-python:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -61,18 +126,21 @@ jobs:
 
   docker:
     runs-on: ubuntu-latest
-    needs: [backend]
+    timeout-minutes: 30
+    needs: [backend, frontend, agent-python]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: backend-jar
-          path: backend/target
+      # 多阶段 Dockerfile 直接从源码构建（无需预编译产物）
       - run: docker compose -f docker-compose.prod.yml build
-      - run: docker compose -f docker-compose.prod.yml config
+      - name: Validate compose config (with required secrets stubbed)
+        env:
+          POSTGRES_PASSWORD: ci-stub-password
+          JWT_SECRET: ci-stub-jwt-secret-0123456789abcdef0123456789abcdef
+        run: docker compose -f docker-compose.prod.yml config --quiet
 
   eval:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -80,31 +148,47 @@ jobs:
           python-version: '3.11'
           cache: pip
           cache-dependency-path: agent-python/requirements.txt
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-          cache: maven
-      - name: Mock eval gate
+      - name: Offline golden eval (mock = smoke baseline)
         run: |
           python -m pip install --upgrade pip
           pip install -r agent-python/requirements.txt
-          pip install langgraph langchain langchain-core
-          python -m pytest agent-python/tests/test_golden_eval.py::test_offline_recall_and_answer_keyword_coverage agent-python/tests/test_golden_eval.py::test_golden_count -v -s
+          python -m pytest agent-python/tests/test_golden_eval.py::test_offline_recall_and_answer_keyword_coverage agent-python/tests/test_golden_eval.py::test_golden_count -v
           python -m pytest agent-python/tests/test_agent_eval.py -v
-          python agent-python/scripts/llm_judge.py --mode mock --out docs/eval-report-mock-ci.md
-          grep -q "avg_keyword_hit" agent-python/docs/eval-report-mock-ci.md
+          python agent-python/scripts/llm_judge.py --mode mock --recall bigram --out agent-python/docs/eval-report-mock-ci.md
+          # 数值门禁：解析报告指标并与阈值比较（不再是无判定的 grep）
+          python agent-python/scripts/check_gate.py agent-python/docs/eval-report-mock-ci.md --min-hit 0.6
+          # trajectory 评测：工具调用序列 vs golden 期望（评"调对工具"，与答案质量互补）
+          python agent-python/scripts/eval_trajectory.py --mode mock --out agent-python/docs/eval-trajectory-mock-ci.md --min-f1 0.9
+          python agent-python/scripts/check_gate.py agent-python/docs/eval-trajectory-mock-ci.md --min-tool-f1 0.9
 
-  integration:
+  real-eval:
     runs-on: ubuntu-latest
-    needs: [backend]
+    timeout-minutes: 30
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_real_eval }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-python@v5
         with:
-          distribution: temurin
-          java-version: '17'
-          cache: maven
-      - name: Integration tests (requires H2, no external DB)
-        working-directory: backend
-        run: mvn -B test -Dtest=AuthControllerTest,AgentControllerTest
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: agent-python/requirements.txt
+      - name: Real LLM eval (requires secrets: OPENAI_API_KEY / OPENAI_BASE_URL / AI_MODEL)
+        working-directory: agent-python
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          AI_MODEL: ${{ secrets.AI_MODEL }}
+          EVAL_REAL_LLM: '1'
+        run: |
+          pip install -r requirements.txt
+          # golden 集真实模型评测 + LLM-as-judge，产出带真实指标的报告
+          python -m pytest tests/test_golden_eval.py -v -m real_llm
+          python scripts/llm_judge.py --mode real --recall bigram --out docs/eval-report-real-ci.md
+          python scripts/check_gate.py docs/eval-report-real-ci.md --min-hit 0.6
+          # trajectory（真实模型）：信息性收集（真实模型规划可合理偏离 golden 关键词口径，暂不设门禁）
+          python scripts/eval_trajectory.py --mode real --out docs/eval-trajectory-real-ci.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eval-report-real
+          path: agent-python/docs/eval-report-real-ci.md
+          retention-days: 30
