@@ -3,7 +3,7 @@
 ## 链路
 
 - 切片：`TextSplitter 800/100 滑动窗口，中文句号“。”友好切分`
-- 入库：`RagService.ingest -> knowledge_doc + knowledge_chunk + VectorStore.add(归一化伪向量 1536)`，H2 下 `currval` 退化为 `MAX(id) WHERE title=?`
+- 入库：`RagService.ingest -> knowledge_doc + knowledge_chunk + VectorStore.add(归一化伪向量，历史记录为 1536 维，现全项目统一 1024)`，H2 下 `currval` 退化为 `MAX(id) WHERE title=?`
 - 召回：`RagService vector top8(阈值0.2) -> 双轨重排(CrossEncoderReranker auto: Python cross-encoder -> BM25回退) top4` + `ILIKE ? 参数化兜底3条` + 向量命中时混合补齐1条；`RecallDetail{vectorHits, reranked, latencyMs}` + `rag.rerank.count{mode}` 可观测，`RAG_RERANK_MODE` 可切换 `auto|bm25|cross-encoder`
 - 重排：`Reranker.java` 离线 BM25 + `CrossEncoderReranker.java` 调 `agent-python /api/rag/rerank`（`rerank.py` cross-encoder/ms-marco，缺权重自动回退 BM25，熔断 5次/30s）
 - 防注入：`ILIKE ?` 占位 + `SqlValidator` 复用表白名单，`RagServiceTest` 含 `' OR 1=1 -- ; DROP` 回归

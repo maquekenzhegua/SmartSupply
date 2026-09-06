@@ -19,14 +19,14 @@
 ## 关键序列
 
 ### 合同风控（RAG + 引用 + 防幻觉）
-上传 -> Tika 解析 -> `TextSplitter 800/100` -> `knowledge_doc` + `knowledge_chunk(embedding 1536)` -> `PgVectorStore.similaritySearch(topK=8)->CrossEncoderReranker(auto: Python cross-encoder->BM25回退) top4 + rag.rerank.count 指标` + `ILIKE 兜底3` -> `PromptGuard.wrap(<knowledge>+<user_query>)` -> `PromptRegistry v3.0(仅基于召回+引用)` -> `ChatClient -- usage回填actual/estimated + TTFT` -> `enforceCitation([引用])` -> 写 `contract_risk_report`
+上传 -> Tika 解析 -> `TextSplitter 800/100` -> `knowledge_doc` + `knowledge_chunk(embedding 1024)` -> `PgVectorStore.similaritySearch(topK=8)->CrossEncoderReranker(auto: Python cross-encoder->BM25回退) top4 + rag.rerank.count 指标` + `ILIKE 兜底3` -> `PromptGuard.wrap(<knowledge>+<user_query>)` -> `PromptRegistry v3.0(仅基于召回+引用)` -> `ChatClient -- usage回填actual/estimated + TTFT` -> `enforceCitation([引用])` -> 写 `contract_risk_report`
 
 切面：`TraceIdFilter` + `TraceContext` 全链路 `X-Trace-Id`（含 SSE），`ObservationService` 计数器+异步落库 `agent_run/step/tool_call`，`TokenContext` 隔离并发，jTokkit `cl100k_base` 真实分词；`GET /api/agent/metrics/summary` + `actuator/prometheus`。
 
 ### 补货预测（ReAct + HITL）
 用户点“AI建议”或定时任务 -> `AgentController` 检测写意图 -> 若 `confirmCreate!=true` 返回 `needConfirm` 前端二次确认 -> `ChatClient` 携带 `InventoryTools/PurchaseTools/CatalogTools/ContractTools` -> LLM 多轮 `planner->tools->reflector` 自主选择 `listLowStock/getInventory/listSuppliers/createPurchaseOrder` -> `ToolSecurity` 鉴权 + `IdempotencyService(10min)` + 入参校验 + DRAFT 默认需审批 -> 前端展示建议 + 采购单表新增 DRAFT
 
-Python 深度推理：前端 `useDeep=true` 且边车健康时 `PythonSidecarService` 经 `RestClient(超时+指数退避3次+熔断30s)` 调 `POST /api/reason`，LangGraph 在 Python 侧做规划与工具调度，失败降级 Java 直连。
+Python 深度推理：前端 `useDeep=true` 且边车健康时 `PythonSidecarService` 经 `RestClient(超时+指数退避3次+熔断30s)` 调 `POST /api/reason`（同时透传发起用户 JWT，边车回环只读工具以此身份调 Java，审计归属真实用户），LangGraph 在 Python 侧做规划与工具调度，失败降级 Java 直连。**边车刻意只暴露 6 个只读工具**——写操作（`createPurchaseOrder`）收敛在 Java 可信执行层走 HITL/鉴权/幂等，属设计而非遗漏。
 
 ### NL2SQL（只读 + 校验）
 用户问题 -> `PromptRegistry v1.3(只读)` -> LLM 生成 SELECT -> `PromptGuard` 标签隔离 -> `SqlValidator(禁 DML/* union pg_ 等 + 多语句 + 表白名单)` -> `JdbcTemplate.queryForList` 只读执行 -> 转 ECharts，前端 `vue-echarts` 渲染。
