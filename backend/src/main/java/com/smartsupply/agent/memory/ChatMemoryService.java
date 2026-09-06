@@ -49,6 +49,12 @@ public class ChatMemoryService {
     public List<Message> load(String sessionId, String systemPrompt) {
         List<Message> out = new ArrayList<>();
         if (systemPrompt != null && !systemPrompt.isBlank()) out.add(new SystemMessage(systemPrompt));
+        // 滚动摘要注入：compress() 的产物此前只写不读（死代码），老对话语义在 20 条窗口外直接丢失
+        String summary = null;
+        try { summary = redis.opsForValue().get(summaryKey(sessionId)); } catch (Exception e) { summary = null; }
+        if (summary != null && !summary.isBlank()) {
+            out.add(new SystemMessage("[历史对话摘要] " + summary));
+        }
         String json;
         try { json = redis.opsForValue().get(key(sessionId)); } catch (Exception e) { json = null; }
         if (json != null && !json.isBlank()) {
@@ -71,7 +77,7 @@ public class ChatMemoryService {
         }
         // Redis miss -> DB 恢复
         try {
-            Long sessionDbId = jdbc.queryForObject("SELECT id FROM chat_session WHERE title=? LIMIT 1", Long.class, sessionId);
+            Long sessionDbId = jdbc.queryForObject("SELECT id FROM chat_session WHERE title=? ORDER BY id DESC LIMIT 1", Long.class, sessionId);
             if (sessionDbId != null) {
                 List<Map<String, Object>> rows = jdbc.queryForList(
                         "SELECT role, content FROM chat_message WHERE session_id=? ORDER BY id DESC LIMIT 40", sessionDbId);
@@ -137,7 +143,7 @@ public class ChatMemoryService {
         // DB 落库（不阻断主流程）
         try {
             Long sessionDbId = null;
-            try { sessionDbId = jdbc.queryForObject("SELECT id FROM chat_session WHERE title=? LIMIT 1", Long.class, sessionId); } catch (Exception ignored) {}
+            try { sessionDbId = jdbc.queryForObject("SELECT id FROM chat_session WHERE title=? ORDER BY id DESC LIMIT 1", Long.class, sessionId); } catch (Exception ignored) {}
             if (sessionDbId == null) {
                 try {
                     Long userId = resolveUserId(username);
@@ -165,7 +171,7 @@ public class ChatMemoryService {
     public String sessionOwner(String sessionId) {
         try {
             List<Map<String, Object>> rows = jdbc.queryForList(
-                    "SELECT u.username AS username FROM chat_session s LEFT JOIN sys_user u ON u.id=s.user_id " +
+                    "SELECT u.username AS \"username\" FROM chat_session s LEFT JOIN sys_user u ON u.id=s.user_id " +
                             "WHERE s.title=? ORDER BY s.id DESC LIMIT 1", sessionId);
             if (rows.isEmpty()) return null;
             Object uname = rows.get(0).get("username");
@@ -231,7 +237,7 @@ public class ChatMemoryService {
         try { summary = redis.opsForValue().get(summaryKey(sessionId)); } catch (Exception ignored) {}
         if (summary == null) {
             try {
-                Long sid = jdbc.queryForObject("SELECT id FROM chat_session WHERE title=? LIMIT 1", Long.class, sessionId);
+                Long sid = jdbc.queryForObject("SELECT id FROM chat_session WHERE title=? ORDER BY id DESC LIMIT 1", Long.class, sessionId);
                 if (sid != null) {
                     Long count = jdbc.queryForObject("SELECT COUNT(*) FROM chat_message WHERE session_id=?", Long.class, sid);
                     if (count != null && count > 40) summary = "已持久化 " + count + " 条，近期进窗 20 轮，历史落库可追溯";

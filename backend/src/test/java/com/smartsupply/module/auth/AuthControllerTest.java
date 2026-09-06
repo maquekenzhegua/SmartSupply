@@ -24,7 +24,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
   "spring.sql.init.mode=never",
   "spring.data.redis.host=localhost", "spring.data.redis.port=6379",
   "spring.ai.openai.api-key=dummy-test-key-for-ci", "smartsupply.ai.mock=true",
-  "spring.ai.vectorstore.pgvector.dimensions=1536"
+  "spring.ai.vectorstore.pgvector.dimensions=1024"
 })
 @AutoConfigureMockMvc
 @ActiveProfiles("test")

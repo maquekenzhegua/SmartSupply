@@ -21,7 +21,7 @@ import static org.junit.jupiter.api.Assertions.*;
   "spring.flyway.enabled=false", "spring.sql.init.mode=never",
   "spring.data.redis.host=localhost", "spring.data.redis.port=6379",
   "spring.ai.openai.api-key=dummy-test-key-for-ci", "smartsupply.ai.mock=true",
-  "spring.ai.vectorstore.pgvector.dimensions=1536"
+  "spring.ai.vectorstore.pgvector.dimensions=1024"
 })
 @ActiveProfiles("test")
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)

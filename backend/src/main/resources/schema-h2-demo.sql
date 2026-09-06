@@ -77,7 +77,9 @@ CREATE TABLE IF NOT EXISTS purchase_order (
     total_amount    NUMERIC(12,2) DEFAULT 0,
     remark          VARCHAR(512),
     created_by      BIGINT,
-    created_at      TIMESTAMP NOT NULL DEFAULT now()
+    created_at      TIMESTAMP NOT NULL DEFAULT now(),
+    approver        VARCHAR(64),
+    approved_at     TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS purchase_order_item (
@@ -151,7 +153,7 @@ CREATE TABLE IF NOT EXISTS chat_message (
 
 -- ========== 演示数据 ==========
 INSERT INTO sys_user (username, password_hash, nickname, role) VALUES
-('admin', '$2a$10$DUMMY_BCRYPT_HASH_REPLACE_ON_STARTUP', '管理员', 'ADMIN')
+('admin', '$2a$10$tHMtL1x/z1DJC1Jdz9UnROXDEXfFfFkkV72zvtBt5Lj5et.AGr6o2', '管理员', 'ADMIN')
 ;
 
 INSERT INTO supplier (name, contact_name, contact_phone, email, rating) VALUES

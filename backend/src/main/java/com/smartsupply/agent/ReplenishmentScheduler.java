@@ -14,7 +14,7 @@ import java.util.Map;
 /**
  * 补货预测 Agent 的自主规划形态：定时扫描低库存 -> LLM 生成补货建议 -> 落库 replenishment_suggestion。
  * LLM 失败时降级为规则建议（缺口 = 安全库存 - 现有库存），保证调度器任何情况下都有产出可审计。
- * 面试可讲：这是典型的“自主 Agent”，由调度器驱动、无需用户唤醒，且写操作只产生建议（不直接下单），仍是 HITL 语义。
+ * 自主 Agent：由调度器驱动、无需用户唤醒；写操作只产生建议（不直接下单），保持 HITL 语义。
  */
 @Component
 public class ReplenishmentScheduler {

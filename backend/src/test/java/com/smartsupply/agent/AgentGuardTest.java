@@ -24,7 +24,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
   "spring.flyway.enabled=false", "spring.sql.init.mode=never",
   "spring.data.redis.host=localhost", "spring.data.redis.port=6379",
   "spring.ai.openai.api-key=dummy-test-key-for-ci", "smartsupply.ai.mock=true",
-  "spring.ai.vectorstore.pgvector.dimensions=1536"
+  "spring.ai.vectorstore.pgvector.dimensions=1024"
 })
 @AutoConfigureMockMvc
 @ActiveProfiles("test")
@@ -32,6 +32,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @Sql(scripts = "/schema-h2.sql", executionPhase = Sql.ExecutionPhase.BEFORE_TEST_CLASS)
 class AgentGuardTest {
     @Autowired MockMvc mvc; @Autowired ObjectMapper om; @Autowired PromptGuard guard; @Autowired TokenEstimator estimator;
+    @Autowired AgentController controller;
 
     private String login() throws Exception {
         String body = mvc.perform(post("/api/auth/login").contentType(MediaType.APPLICATION_JSON)
@@ -80,6 +81,55 @@ class AgentGuardTest {
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
         assertEquals(200, om.readTree(body).path("code").asInt());
         assertTrue(om.readTree(body).path("data").path("reply").asText().length() > 0);
+    }
+
+    @Test void hitlCatchesExtendedWritePhrasings() throws Exception {
+        // #5b 回归：扩面关键词（下个单/帮我订/place order）不得绕过二次确认
+        String token = login();
+        for (String phrasing : new String[]{"给 SKU-T001-WH-M 下个单", "帮我订采购单，供应商1，500件", "please place order for SKU-B001-BE"}) {
+            String body = mvc.perform(post("/api/agent/chat").header("Authorization","Bearer "+token)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content(om.writeValueAsString(Map.of("message", phrasing, "agentType","replenishment","sessionId","guard-t0"))))
+                    .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+            assertTrue(om.readTree(body).path("data").path("needConfirm").asBoolean(false),
+                    "扩展写意图措辞应要求二次确认: " + phrasing);
+        }
+    }
+
+    @Test void writeIntentDetectorPaths() {
+        // 关键词快路径：明确写操作
+        assertTrue(controller.isWriteIntent("帮我直接创建采购单，给 SKU-T001-WH-M 下单 500 件"));
+        assertTrue(controller.isWriteIntent("please place an order for 500 units"));
+        // 无动作词汇：不触发分类器、直接放行（读查询零额外 LLM 成本）
+        assertFalse(controller.isWriteIntent("查询低库存SKU"));
+        assertFalse(controller.isWriteIntent("哪些SKU低于安全库存"));
+        // 含动作词汇但非写操作：分类器（mock 环境返回非 YES）→ 放行，不误伤读查询
+        assertFalse(controller.isWriteIntent("查看采购单状态"));
+    }
+
+    @Test void streamWriteIntentAlsoGated() throws Exception {
+        // 回归：写闸门此前只挂在 /chat，前端默认流式路径可绕过 HITL 确认 UX
+        String token = login();
+        var req = mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                .post("/api/agent/chat/stream")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(om.writeValueAsString(Map.of("message", "帮我直接创建采购单，给 SKU-T001-WH-M 下单 500 件",
+                        "agentType", "replenishment", "sessionId", "guard-stream-1"))));
+        // 闸门在请求线程同步完成 emitter，异步已启动且内容含 confirm 事件
+        org.springframework.test.web.servlet.MvcResult res = req.andReturn();
+        String sse = res.getResponse().getContentAsString();
+        assertTrue(sse.contains("event:confirm") && sse.contains("needConfirm"),
+                "流式写意图应下发 confirm 事件，实际响应: [" + sse + "]");
+    }
+
+    @Test void userTraceEndpointScopesToOwner() throws Exception {
+        String token = login();
+        // 不存在的 runId → 404 业务码
+        mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/api/agent/runs/999999/trace")
+                        .header("Authorization", "Bearer " + token))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(404));
     }
 
     @Test void hallucinationCitationAppendedForContract() throws Exception {

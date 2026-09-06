@@ -8,7 +8,7 @@ import java.util.regex.Pattern;
 
 /**
  * Prompt 注入与幻觉放行管控。
- * 面试可讲：输入层消毒 + 角色标签隔离 + 输出层引用校验，非“只在 Prompt 里写一句话”。
+ * 三层防护：输入层消毒 + 角色标签隔离 + 输出层引用校验。
  */
 @Component
 public class PromptGuard {
@@ -49,11 +49,20 @@ public class PromptGuard {
     public String wrapUserContent(String sanitizedUserContent, String ragContext) {
         StringBuilder sb = new StringBuilder();
         if (ragContext != null && !ragContext.isBlank()) {
-            sb.append("<knowledge>\n").append(ragContext).append("\n</knowledge>\n\n");
+            sb.append("<knowledge>\n").append(neutralizeTags(ragContext)).append("\n</knowledge>\n\n");
         }
-        sb.append("<user_query>\n").append(sanitizedUserContent).append("\n</user_query>");
+        sb.append("<user_query>\n").append(neutralizeTags(sanitizedUserContent)).append("\n</user_query>");
         sb.append("\n[约束] 仅基于 <knowledge> 作答；未在 knowledge 中出现的事实必须声明“依据不足”并拒绝臆断；给出 doc 引用。");
         return sb.toString();
+    }
+
+    /**
+     * 中和沙箱标签的闭合序列：用户输入里出现 </user_query> / </knowledge> 会在拼接时提前
+     * 逃出沙箱标签，把后续系统约束变成"用户内容"。只转义这两个闭合标签，不影响正常代码片段。
+     */
+    private String neutralizeTags(String s) {
+        if (s == null) return "";
+        return s.replaceAll("(?i)</\\s*(user_query|knowledge)\\s*>", "&lt;/$1&gt;");
     }
 
     public String citationInstruction(String ragContext) {

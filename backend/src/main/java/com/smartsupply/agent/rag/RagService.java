@@ -16,7 +16,7 @@ import java.util.stream.Collectors;
 
 /**
  * RAG 服务：向量检索 + 关键词兜底 + 双轨重排，分段入库保证中文长文召回。
- * 切片策略：TextSplitter 800/100 滑动窗口，中文句号友好；面试可讲窗口与 overlap 的权衡。
+ * 切片策略：TextSplitter 800/100 滑动窗口，中文句号友好。
  * 召回：vector topK=8 -> 双轨重排(CrossEncoderReranker auto→BM25回退) top4，再拼接关键词兜底补齐，阈值 0.2。
  */
 @Service

@@ -147,6 +147,19 @@
             <artifactId>spring-security-test</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- 真 PG 回归（PostgresRegressionTest）：H2 与 PG 的方言/迁移差异曾让
+             created_by 类型 bug 全绿通过——Testcontainers 起 pgvector 镜像跑真迁移真 SQL。
+             版本由 Spring Boot BOM 管理；disabledWithoutDocker 保证无 Docker 环境自动跳过 -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
         <!-- H2: test scope for `mvn test -o`; also runtime for offline demo `java -jar` (VMware PG down 时兜底) -->
         <dependency>
             <groupId>com.h2database</groupId>

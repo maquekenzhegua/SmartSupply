@@ -16,9 +16,9 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicLong;
 
 import com.smartsupply.common.TokenContext;
 import reactor.core.publisher.Flux;
@@ -36,9 +36,6 @@ public class MuseSparkChatModel implements ChatModel {
     private final String model;
     private final HttpClient http;
     private final ObjectMapper om = new ObjectMapper();
-    private static final AtomicLong lastPromptTokens = new AtomicLong(0);
-    private static final AtomicLong lastCompletionTokens = new AtomicLong(0);
-    private static volatile String lastSource = "estimated";
 
     public MuseSparkChatModel(String apiKey, String baseUrl, String model) {
         this.apiKey = apiKey;
@@ -47,30 +44,13 @@ public class MuseSparkChatModel implements ChatModel {
         this.http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
     }
 
-    public static long consumeLastPromptTokens() {
-        TokenContext.Usage u = TokenContext.consume();
-        if (u != null) return u.promptTokens();
-        return lastPromptTokens.getAndSet(0);
-    }
-    public static long consumeLastCompletionTokens() {
-        // paired with prompt consume; if TokenContext already consumed, return 0 to avoid double-count
-        TokenContext.Usage u = TokenContext.consume();
-        if (u != null) return u.completionTokens();
-        return lastCompletionTokens.getAndSet(0);
-    }
-    public static String consumeLastSource() {
-        TokenContext.Usage u = TokenContext.consume();
-        if (u != null) return u.source();
-        String s = lastSource; lastSource = "estimated"; return s;
-    }
+    /**
+     * 唯一的用量读取口：从请求线程/流式回调线程的 ThreadLocal 取（写入与读取在同一线程），
+     * 调用方必须一次消费完 prompt+completion。此前的 static AtomicLong 兜底是跨请求共享可变状态，
+     * 并发下会把 A 请求的 token 记到 B 请求，已移除；取不到即返回 null，由调用方回退估算。
+     */
     public static TokenContext.Usage consumeUsage() {
-        TokenContext.Usage u = TokenContext.consume();
-        if (u != null) return u;
-        long p = lastPromptTokens.getAndSet(0);
-        long c = lastCompletionTokens.getAndSet(0);
-        String s = lastSource; lastSource = "estimated";
-        if (p == 0 && c == 0) return null;
-        return new TokenContext.Usage((int) p, (int) c, s);
+        return TokenContext.consume();
     }
 
     @Override
@@ -125,9 +105,6 @@ public class MuseSparkChatModel implements ChatModel {
                 }
             } catch (Exception ignored) {}
             TokenContext.set(promptTokens, completionTokens, source);
-            lastPromptTokens.set(promptTokens);
-            lastCompletionTokens.set(completionTokens);
-            lastSource = source;
             long latency = System.currentTimeMillis() - start;
             log.info("muse call model={} latencyMs={} promptTokens~{} completionTokens~{} source={} traceInputLen={}", model, latency, promptTokens, completionTokens, source, input.length());
             AssistantMessage msg = new AssistantMessage(text);
@@ -242,10 +219,7 @@ public class MuseSparkChatModel implements ChatModel {
                 long ct = completionTok.get();
                 String src = promptTok.get() > 0 ? "actual" : "estimated";
                 TokenContext.set((int) pt, (int) ct, src);
-                lastPromptTokens.set(pt);
-                lastCompletionTokens.set(ct);
-                lastSource = src;
-                log.info("muse stream model={} promptTokens~{} completionTokens~{} source={}", model, pt, ct, lastSource);
+                log.info("muse stream model={} promptTokens~{} completionTokens~{} source={}", model, pt, ct, src);
                 sink.complete();
             } catch (Exception e) {
                 sink.error(new RuntimeException("muse stream failed: " + e.getMessage(), e));

@@ -27,6 +27,7 @@ public class DemoDataInitializer {
     public DemoDataInitializer(Environment env) { this.env = env; }
 
     @Bean
+    @org.springframework.core.annotation.Order(1) // KnowledgeSeeder(@Order(2)) 依赖本 runner 先建表
     ApplicationRunner initH2SchemaIfNeeded(JdbcTemplate jdbc) {
         return args -> {
             if (flywayEnabled) return;

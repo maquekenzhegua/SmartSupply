@@ -80,13 +80,34 @@ public class ObservationService {
     public long insertRun(String traceId, String username, Long userId, String sessionId, String agentType, String mode, String model) {
         try {
             String sql = "INSERT INTO agent_run(trace_id, user_id, username, session_id, agent_type, mode, status, model) VALUES (?,?,?,?,?,?,?,?)";
-            jdbc.update(sql, traceId, userId, username, sessionId, agentType, mode, "RUNNING", model);
-            Long id = jdbc.queryForObject("SELECT MAX(id) FROM agent_run WHERE trace_id=?", Long.class, traceId);
-            return id == null ? -1 : id;
+            // 直接取生成主键：此前"INSERT 后 SELECT MAX(id) WHERE trace_id=?"在并发同 trace 下会拿错行
+            org.springframework.jdbc.support.KeyHolder kh = new org.springframework.jdbc.support.GeneratedKeyHolder();
+            jdbc.update(con -> {
+                var ps = con.prepareStatement(sql, java.sql.Statement.RETURN_GENERATED_KEYS);
+                ps.setString(1, traceId);
+                if (userId == null) ps.setNull(2, java.sql.Types.BIGINT); else ps.setLong(2, userId);
+                ps.setString(3, username);
+                ps.setString(4, sessionId);
+                ps.setString(5, agentType);
+                ps.setString(6, mode);
+                ps.setString(7, "RUNNING");
+                ps.setString(8, model);
+                return ps;
+            }, kh);
+            Number id = kh.getKey();
+            return id == null ? -1 : id.longValue();
         } catch (Exception e) {
             log.warn("insertRun failed: {}", e.toString());
             return -1;
         }
+    }
+
+    public void updateRunMode(long runId, String mode) {
+        persistPool.execute(() -> {
+            try {
+                jdbc.update("UPDATE agent_run SET mode=? WHERE id=?", mode, runId);
+            } catch (Exception e) { log.warn("updateRunMode failed runId={}: {}", runId, e.toString()); }
+        });
     }
 
     public void completeRun(long runId, String status, long latencyMs, Long ttfbMs, int promptTokens, int completionTokens, double costUsd, String tokenSource, String errorMsg) {

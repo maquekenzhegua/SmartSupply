@@ -40,4 +40,17 @@ public class InventoryController {
                 """);
         return Result.ok(rows);
     }
+
+    /** 按 SKU 编码查库存（含安全库存与是否低于线）。参数化查询；供 Agent 回环工具使用。 */
+    @GetMapping("/by-sku")
+    public Result<Map<String, Object>> bySku(@RequestParam String skuCode) {
+        List<Map<String, Object>> rows = jdbc.queryForList("""
+                SELECT s.sku_code, s.spec, w.name as warehouse, i.quantity, i.safety_stock,
+                       CASE WHEN i.quantity < i.safety_stock THEN true ELSE false END as below_safety
+                FROM inventory i JOIN sku s ON s.id=i.sku_id JOIN warehouse w ON w.id=i.warehouse_id
+                WHERE s.sku_code = ? ORDER BY (i.safety_stock - i.quantity) DESC
+                """, skuCode);
+        if (rows.isEmpty()) return Result.ok(Map.of("found", false, "sku_code", skuCode));
+        return Result.ok(Map.of("found", true, "sku_code", skuCode, "records", rows));
+    }
 }

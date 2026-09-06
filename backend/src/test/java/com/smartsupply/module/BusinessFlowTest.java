@@ -40,11 +40,18 @@ class BusinessFlowTest {
 
     @Autowired MockMvc mvc;
     @Autowired ObjectMapper om;
+    @Autowired org.springframework.jdbc.core.JdbcTemplate jdbc;
+    @Autowired org.springframework.security.crypto.password.PasswordEncoder encoder;
+    @Autowired org.springframework.data.redis.core.StringRedisTemplate stringRedis;
 
     private String token() throws Exception {
+        return token("admin", "admin123");
+    }
+
+    private String token(String username, String password) throws Exception {
         String body = mvc.perform(post("/api/auth/login")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(om.writeValueAsString(Map.of("username", "admin", "password", "admin123"))))
+                        .content(om.writeValueAsString(Map.of("username", username, "password", password))))
                 .andReturn().getResponse().getContentAsString();
         return om.readTree(body).path("data").path("token").asText();
     }
@@ -65,17 +72,17 @@ class BusinessFlowTest {
     }
 
     @Test void inventoryAdjustAndFlowsRecorded() throws Exception {
-        String t = token();
-        // SKU 1 在仓库1当前 120，加 10 -> 130
+        String t = token("admin", "admin123");
+        Integer before = jdbc.queryForObject(
+                "SELECT quantity FROM inventory WHERE sku_id=1 AND warehouse_id=1", Integer.class);
+        // SKU 1 在仓库1加 10 -> 差值断言（其它用例可能已变更共享库存，硬编码数值会互踩）
         mvc.perform(post("/api/inventory/adjust").header("Authorization", "Bearer " + t)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(om.writeValueAsString(Map.of("skuId", 1, "warehouseId", 1, "changeQty", 10, "reason", "TEST_BIZ"))))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.code").value(200));
-
-        String after = mvc.perform(get("/api/inventory").header("Authorization", "Bearer " + t))
-                .andReturn().getResponse().getContentAsString();
-        // 校验至少有一条 130
-        assertThat(after).contains("130");
+        Integer after = jdbc.queryForObject(
+                "SELECT quantity FROM inventory WHERE sku_id=1 AND warehouse_id=1", Integer.class);
+        assertThat(after).isEqualTo(before + 10);
 
         // 流水可查
         String flows = mvc.perform(get("/api/inventory/flows").header("Authorization", "Bearer " + t))
@@ -95,10 +102,10 @@ class BusinessFlowTest {
                 .andExpect(jsonPath("$.code").value(400));
     }
 
-    // ========== 采购域：创建->查询->状态流转->删除 ==========
+    // ========== 采购域：创建->审批(RBAC+留痕)->收货(自动入库)->删除（状态机约束） ==========
 
     @Test void purchaseOrderLifecycle() throws Exception {
-        String t = token();
+        String t = token("admin", "admin123");
         String createBody = om.writeValueAsString(Map.of(
                 "supplierId", 1,
                 "remark", "BizTest 采购单",
@@ -122,17 +129,127 @@ class BusinessFlowTest {
         mvc.perform(get("/api/purchase-orders-extra/" + poId).header("Authorization", "Bearer " + t))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.data.items").isArray());
 
-        // 状态流转 DRAFT->APPROVED->RECEIVED，非法的回 400
-        mvc.perform(put("/api/purchase-orders-extra/" + poId + "/status").header("Authorization", "Bearer " + t)
-                        .contentType(MediaType.APPLICATION_JSON).content(om.writeValueAsString(Map.of("status", "APPROVED"))))
-                .andExpect(jsonPath("$.code").value(200));
+        // 非法状态名 -> 400
         mvc.perform(put("/api/purchase-orders-extra/" + poId + "/status").header("Authorization", "Bearer " + t)
                         .contentType(MediaType.APPLICATION_JSON).content(om.writeValueAsString(Map.of("status", "ILLEGAL"))))
                 .andExpect(jsonPath("$.code").value(400));
 
-        // 删除
-        mvc.perform(delete("/api/purchase-orders-extra/" + poId).header("Authorization", "Bearer " + t))
+        Integer qtyBefore = jdbc.queryForObject(
+                "SELECT quantity FROM inventory WHERE sku_id=1 AND warehouse_id=1", Integer.class);
+        String flowBefore = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM inventory_flow WHERE reason LIKE '采购入库 %'", String.class);
+
+        // DRAFT -> APPROVED：留痕审批人与时间
+        mvc.perform(put("/api/purchase-orders-extra/" + poId + "/status").header("Authorization", "Bearer " + t)
+                        .contentType(MediaType.APPLICATION_JSON).content(om.writeValueAsString(Map.of("status", "APPROVED"))))
                 .andExpect(jsonPath("$.code").value(200));
+        Map<String, Object> po = jdbc.queryForMap("SELECT status, approver, approved_at FROM purchase_order WHERE id=?", poId);
+        assertThat(po.get("status")).isEqualTo("APPROVED");
+        assertThat(po.get("approver")).isEqualTo("admin");
+        assertThat(po.get("approved_at")).isNotNull();
+
+        // 重复流转同一目标（DRAFT 前驱已不在）：CAS 拦下
+        mvc.perform(put("/api/purchase-orders-extra/" + poId + "/status").header("Authorization", "Bearer " + t)
+                        .contentType(MediaType.APPLICATION_JSON).content(om.writeValueAsString(Map.of("status", "APPROVED"))))
+                .andExpect(jsonPath("$.code").value(400));
+
+        // APPROVED -> RECEIVED：自动入库 + 流水（采购→库存闭环）
+        mvc.perform(put("/api/purchase-orders-extra/" + poId + "/status").header("Authorization", "Bearer " + t)
+                        .contentType(MediaType.APPLICATION_JSON).content(om.writeValueAsString(Map.of("status", "RECEIVED"))))
+                .andExpect(jsonPath("$.code").value(200));
+        Integer qtyAfter = jdbc.queryForObject(
+                "SELECT quantity FROM inventory WHERE sku_id=1 AND warehouse_id=1", Integer.class);
+        assertThat(qtyAfter).isEqualTo(qtyBefore + 5);
+        String flowAfter = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM inventory_flow WHERE reason LIKE '采购入库 %'", String.class);
+        assertThat(Integer.parseInt(flowAfter)).isEqualTo(Integer.parseInt(flowBefore) + 1);
+
+        // 终态不可再变更
+        mvc.perform(put("/api/purchase-orders-extra/" + poId + "/status").header("Authorization", "Bearer " + t)
+                        .contentType(MediaType.APPLICATION_JSON).content(om.writeValueAsString(Map.of("status", "CANCELLED"))))
+                .andExpect(jsonPath("$.code").value(400));
+
+        // 已生效采购单不可物理删除
+        mvc.perform(delete("/api/purchase-orders-extra/" + poId).header("Authorization", "Bearer " + t))
+                .andExpect(jsonPath("$.code").value(400));
+
+        // DRAFT 可 CANCELLED 后删除
+        String createBody2 = om.writeValueAsString(Map.of(
+                "supplierId", 1, "remark", "BizTest 采购单2",
+                "items", List.of(Map.of("skuId", 2, "quantity", 3, "unitPrice", 10.0))));
+        MvcResult cr2 = mvc.perform(post("/api/purchase-orders-extra").header("Authorization", "Bearer " + t)
+                        .contentType(MediaType.APPLICATION_JSON).content(createBody2))
+                .andExpect(jsonPath("$.code").value(200)).andReturn();
+        long poId2 = om.readTree(cr2.getResponse().getContentAsString()).path("data").path("id").asLong();
+        mvc.perform(put("/api/purchase-orders-extra/" + poId2 + "/status").header("Authorization", "Bearer " + t)
+                        .contentType(MediaType.APPLICATION_JSON).content(om.writeValueAsString(Map.of("status", "CANCELLED"))))
+                .andExpect(jsonPath("$.code").value(200));
+        mvc.perform(delete("/api/purchase-orders-extra/" + poId2).header("Authorization", "Bearer " + t))
+                .andExpect(jsonPath("$.code").value(200));
+    }
+
+    // ========== Agent 写工具真插库回归 ==========
+    // 起因：实跑演练发现 created_by(BIGINT) 被塞入用户名字符串——该路径此前只有
+    // Python 侧打桩测试，Java 侧从未真实落库，68 个用例全绿也没暴露。此用例封住缺口。
+
+    @Test void agentWriteCreatesRealPurchaseOrderWithCreatorId() throws Exception {
+        // quantity=42 与演示/演练常用参数(100)解耦，避免同 key 十分钟窗口内互相幂等拒绝；
+        // 调用前预清理 + 结束后清理：测试重跑不依赖 Redis 键的过期时机
+        String t = token("admin", "admin123");
+        String idemKey = "idem:po:admin:1:SKU-T001-WH-M:42:9.9";
+        stringRedis.delete(idemKey);
+        MvcResult res = mvc.perform(post("/api/agent/purchase-orders")
+                        .header("Authorization", "Bearer " + t)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(om.writeValueAsString(Map.of(
+                                "supplierId", 1, "skuCode", "SKU-T001-WH-M",
+                                "quantity", 42, "unitPrice", 9.9))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.success").value(true))
+                .andReturn();
+        String orderNo = om.readTree(res.getResponse().getContentAsString())
+                .path("data").path("orderNo").asText();
+        assertThat(orderNo).startsWith("PO-");
+        // created_by 必须是 sys_user.id（数字），且明细行同事务落库
+        Long adminId = jdbc.queryForObject("SELECT id FROM sys_user WHERE username='admin'", Long.class);
+        Map<String, Object> po = jdbc.queryForMap(
+                "SELECT created_by, total_amount FROM purchase_order WHERE order_no=?", orderNo);
+        assertThat(((Number) po.get("created_by")).longValue()).isEqualTo(adminId);
+        assertThat(((Number) jdbc.queryForObject(
+                "SELECT quantity FROM purchase_order_item WHERE order_id=" +
+                        "(SELECT id FROM purchase_order WHERE order_no=?)", Integer.class, orderNo))
+                .intValue()).isEqualTo(42);
+        // 幂等 key 在共享 Redis 里：成功路径按设计不释放（防10分钟内重复创建），测试必须自清
+        stringRedis.delete(idemKey);
+    }
+
+    @Test void purchaseStatusChangeRequiresAdmin() throws Exception {
+        String admin = token("admin", "admin123");
+        String createBody = om.writeValueAsString(Map.of(
+                "supplierId", 1, "remark", "RBAC 采购单",
+                "items", List.of(Map.of("skuId", 1, "quantity", 1, "unitPrice", 1.0))));
+        MvcResult cr = mvc.perform(post("/api/purchase-orders-extra").header("Authorization", "Bearer " + admin)
+                        .contentType(MediaType.APPLICATION_JSON).content(createBody))
+                .andExpect(jsonPath("$.code").value(200)).andReturn();
+        long poId = om.readTree(cr.getResponse().getContentAsString()).path("data").path("id").asLong();
+
+        // 测试环境下 DemoUserInitializer 跑在 @Sql 建表之前会静默失败，ops 不在库里——测试自种：
+        // 真实 BCrypt 哈希 + OPS 角色（生产由 initializer 负责，此处只复现"存在低权限账号"这一前提）
+        jdbc.update("DELETE FROM sys_user WHERE username='ops'");
+        jdbc.update("INSERT INTO sys_user(username, password_hash, nickname, role) VALUES ('ops', ?, '运营专员', 'OPS')",
+                encoder.encode("ops123"));
+        // OPS 角色无审批权：前端藏按钮不等于防线，API 层必须拦（DRAFT->APPROVED 是 ADMIN 专属决策）
+        String ops = token("ops", "ops123");
+        mvc.perform(put("/api/purchase-orders-extra/" + poId + "/status").header("Authorization", "Bearer " + ops)
+                        .contentType(MediaType.APPLICATION_JSON).content(om.writeValueAsString(Map.of("status", "APPROVED"))))
+                .andExpect(jsonPath("$.code").value(403));
+        // 未登录同样拦截
+        mvc.perform(put("/api/purchase-orders-extra/" + poId + "/status")
+                        .contentType(MediaType.APPLICATION_JSON).content(om.writeValueAsString(Map.of("status", "APPROVED"))))
+                .andExpect(status().isForbidden());
+        // 审批状态未被改动
+        assertThat(jdbc.queryForObject("SELECT status FROM purchase_order WHERE id=?", String.class, poId))
+                .isEqualTo("DRAFT");
     }
 
     @Test void purchaseOrderRequiresItems() throws Exception {

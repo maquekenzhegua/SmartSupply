@@ -50,7 +50,7 @@ public class MockChatModel implements ChatModel {
         } else if (lower.contains("退货") || lower.contains("分析") || lower.contains("sql") || lower.contains("华南")) {
             text = """
                     [Mock] 经营分析完成：
-                    SELECT category, COUNT(*)/SUM(COUNT(*)) OVER() AS return_rate FROM orders GROUP BY category;
+                    SELECT category, COUNT(*) AS cnt FROM product GROUP BY category;
                     结论（Mock）：华南区“服装”品类退货率最高(12.3%)，主因尺码偏大。已生成 ECharts 配置。
                     提示：真实 NL2SQL 会经 SqlValidator 校验后只读执行。
                     """;

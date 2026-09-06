@@ -21,7 +21,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 /**
  * Agent 性能基线：并发延迟 P50/P95/P99、吞吐、成功率，STAR 中 Result 的量化依据。
  * 离线可跑（H2 + MockChatModel，无真实 LLM/PG/Redis），结果写入 surefire 输出供报告采集。
- * 面试可讲：Mock 下测的是编排层开销，真 LLM 接入后在相同压测脚本上对比即可得真实 P95。
+ * 注：Mock 下测的是编排层开销，不代表真实模型延迟；真 LLM 接入后需在相同脚本上重测 P95。
  */
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:testdb-perf;DB_CLOSE_DELAY=-1;MODE=PostgreSQL",

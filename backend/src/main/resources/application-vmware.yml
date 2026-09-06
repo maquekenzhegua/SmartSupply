@@ -21,6 +21,8 @@ spring:
         index-type: HNSW
         distance-type: COSINE_DISTANCE
         dimensions: ${VECTOR_DIMENSIONS:1024}
+        # PG 冷启动建表（CREATE EXTENSION vector 是 PG 专有，默认 false 保护 H2 演示）
+        initialize-schema: true
 
 smartsupply:
   ai:
@@ -31,7 +33,7 @@ smartsupply:
   agent-python:
     enabled: ${AGENT_PYTHON_ENABLED:false}
     base-url: ${AGENT_PYTHON_URL:http://127.0.0.1:8001}
-    timeout-ms: 12000
+    timeout-ms: 90000   # 深度模式多步 ReAct（2~6 次 LLM 调用 + 工具回环），12s 必然超时并拖垮熔断
 
 logging:
   level:

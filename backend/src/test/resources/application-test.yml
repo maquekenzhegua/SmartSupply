@@ -1,0 +1,19 @@
+# 测试 profile（@ActiveProfiles("test") 的 SpringBootTest 自动加载）
+# PgVectorStore 的 initializeSchema 会执行 PG 专有语句 CREATE EXTENSION vector，
+# H2 无法解析导致上下文启动失败；测试用 schema-h2.sql 预建表，这里关掉自动建表。
+spring:
+  ai:
+    vectorstore:
+      pgvector:
+        initialize-schema: false
+
+# 限流依赖 Redis；本机是否有 Redis 会改变测试结果（无则异常放行、有则真实限流，
+# AgentPerfTest 120 次并发必然超 30/min 得 429）。测试关掉限流保证确定性。
+smartsupply:
+  ratelimit:
+    enabled: false
+  # 测试类普遍注入 spring.ai.openai.api-key=dummy → embedding 判定为"已配置"，
+  # 于是每个检索请求真打 api.openai.com（401+重试），AgentPerfTest 偶发 15s 离群值即由此来。
+  # 测试 profile 强制 MockEmbedding：零网络、结果确定。
+  ai:
+    embedding-mock: true
