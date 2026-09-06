@@ -1,5 +1,7 @@
 # Eval Report — mock — 2026-09-02
 
+> 历史快照（早期口径，60 条集初版）。当前主线结论见 [rag-eval-diagnosis-2026-09-04.md](rag-eval-diagnosis-2026-09-04.md) 与 [eval-report-real-summary.md](eval-report-real-summary.md)。
+
 - 模型: muse-spark-1.2-contributor
 - 样本数: 60
 - avg_keyword_hit: 0.900

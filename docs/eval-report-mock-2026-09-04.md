@@ -1,5 +1,7 @@
 # Eval Report — mock — 2026-09-04
 
+> 快照（CI mock 门禁同口径）。真实模型主线结论见 [rag-eval-diagnosis-2026-09-04.md](rag-eval-diagnosis-2026-09-04.md) 与 [eval-report-real-summary.md](eval-report-real-summary.md)。
+
 - 模型: mock
 - 样本数: 60
 - 召回策略: vector（Embedding: qwen3-embedding:0.6b）

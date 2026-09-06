@@ -86,7 +86,12 @@ docker run --rm -i -e BASE_URL=http://host.docker.internal:8080 grafana/k6 run -
 
 ## 文档
 
-- 架构与时序：docs/architecture.md
+复习从 [docs/README.md](docs/README.md)（文档导航与复习路径）进，推荐顺序：
+
+- 架构与设计决策：docs/architecture.md
+- 源码导读：docs/code-map.md
+- 开发问题复盘：docs/lessons-learned.md
+- 测试与量化报告：docs/test-report.md
 - 演示剧本：docs/interview-script.md
 
 ## License

@@ -1,5 +1,7 @@
 # Agent 观测 / 评测 / 治理
 
+> 本文按能力+时间线记录演进契约；开发问题的完整复盘（现象→排查→根因→修复→教训）独立整理在 [lessons-learned.md](lessons-learned.md)。
+
 ## 观测
 - 异步落库：ObservationService 计数器 + 线程池(2,4,60s,1000) 写入 agent_run/step/tool_call，失败仅告警
 - 跨语言 trace：TraceIdFilter 生成 X-Trace-Id，经 TraceContext ThreadLocal + MDC 透传至 PythonSidecar，回传 trace/tool_results/iters 落 agent_step

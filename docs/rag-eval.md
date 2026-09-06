@@ -1,5 +1,7 @@
 # RAG 回归说明（2026-08-27）
 
+> 历史快照（首轮链路与成本记录）。RAG 质量主线见 [rag-eval-diagnosis-2026-09-04.md](rag-eval-diagnosis-2026-09-04.md)。
+
 ## 链路
 
 - 切片：`TextSplitter 800/100 滑动窗口，中文句号“。”友好切分`

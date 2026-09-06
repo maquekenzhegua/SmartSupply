@@ -1,5 +1,7 @@
 # SmartSupply 架构说明（C路）
 
+> 源码导读（每个文件读什么、按什么顺序）见 [code-map.md](code-map.md)；实现中踩过的坑见 [lessons-learned.md](lessons-learned.md)。
+
 ## 目标
 
 用企业级底座的工程质量，承载原创供应链 Agent 的业务价值，满足 Agent 开发岗对“全栈 + RAG + Tool Calling + 安全 + 可演示”的全方位考察。
@@ -45,6 +47,19 @@ Python 深度推理：前端 `useDeep=true` 且边车健康时 `PythonSidecarSer
 - 链路：`TraceIdFilter` 生成 `X-Trace-Id` 入 MDC，响应头回传，SSE 子线程透传
 - 指标：`ObservationService` -> Micrometer `agent.chat.latency/tokens{source}/cost{source}`、`agent.chat.ttft`、`agent.tool.count/latency`、`rag.recall.latency`、`rag.rerank.count{mode}`，`management.endpoints=health,metrics,prometheus` + `GET /api/agent/metrics/summary`
 - 日志：`logback-spring.xml` `%d [%thread] %-5level [%X{traceId}] %logger - %msg` 控制台+滚动文件 `20MB*14天`
+
+## 设计决策记录（面试高频"为什么"）
+
+| 决策 | 理由 | 代价与边界 |
+| --- | --- | --- |
+| Java 编排 + Python LangGraph 边车双语言 | Java 承接企业底座与治理；ReAct/interrupt/checkpointer 生态在 LangGraph 侧成熟；边车不可用自动回退 java-direct，可用性不降档 | 跨语言 trace 与身份透传成本（TraceContext + JWT 透传）；运维两个服务 |
+| HITL 双层：图内 interrupt + java-direct 关键词闸门兜底 | interrupt 基于模型真实工具调用决策，语义强、不可被措辞绕过；java-direct 路径没有图，关键词闸门（LLM 分类器兜底、强动作词 fail-closed）防绕过 | 两处闸门需保持语义一致 |
+| 写操作收敛在 Java 可信执行层 | ADMIN 鉴权/幂等/DRAFT 状态机等企业约束不随模型能力漂移；Python 侧只做取证 | 多一跳工具回环调用 |
+| MCP 写工具默认不暴露 | MCP 传输通道没有人工批准环节，暴露即绕过 HITL；`MCP_ENABLE_WRITE=1` 显式开启后执行层约束仍生效（纵深防御不减层） | 外部 MCP 客户端默认只能读 |
+| checkpointer 缺省 MemorySaver，`CHECKPOINT_URI` 切 Postgres | 演示/测试零依赖开箱即用；生产可恢复（跨重启/多实例），Postgres 不可达诚实降级 + 大声告警 | 单机 MemorySaver 重启丢挂起状态 |
+| 失败不伪装（ok=false 信封 / degraded 显式化） | agent 的信任边界：取证失败必须如实拒答（degrade_reason），禁止编造；降级路径与成功路径在台账/前端可区分 | 调用方需处理 degraded 形态 |
+| 评测双维：答案 LLM-as-judge + 工具轨迹 | 只评答案会漏"答对了但过程乱"（误调度/漏调度）；轨迹 precision/recall/f1 卡过程质量 | 轨迹集需维护 golden 期望序列 |
+| Token 双口径（actual 优先 / estimated 打标） | 网关不回传 usage 时观测不中断，但估算永不伪装成真实用量（token_source 随 trace 落库）；Java 台账独立走 jtokkit | 两套口径并存需在报表中标注来源 |
 
 ## 扩展与治理
 
