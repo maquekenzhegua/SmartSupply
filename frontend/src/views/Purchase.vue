@@ -4,7 +4,7 @@
       <template #header>
         <div style="display: flex; justify-content: space-between"><span>采购单</span><el-button type="primary" @click="openCreate">新建采购单</el-button></div>
       </template>
-      <el-table :data="rows" v-loading="loading" @row-click="viewDetail">
+      <el-table v-loading="loading" :data="rows" @row-click="viewDetail">
         <el-table-column prop="order_no" label="单号" width="160" />
         <el-table-column prop="supplier_name" label="供应商" min-width="140" />
         <el-table-column prop="status" label="状态" width="110"><template #default="{ row }"><el-tag :type="statusType(row.status as string)">{{ row.status }}</el-tag></template></el-table-column>
@@ -13,12 +13,12 @@
         <el-table-column label="操作" width="200">
           <template #default="{ row }">
             <el-button size="small" @click.stop="viewDetail(row)">详情</el-button>
-            <el-button size="small" @click.stop="changeStatus(row, 'APPROVED')" v-if="row.status==='DRAFT'">审核</el-button>
+            <el-button v-if="row.status==='DRAFT'" size="small" @click.stop="changeStatus(row, 'APPROVED')">审核</el-button>
             <el-button size="small" type="danger" @click.stop="remove(row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
-      <el-pagination style="margin-top:12px; justify-content:flex-end" v-model:current-page="page" :page-size="size" :total="total" layout="prev, pager, next" @current-change="load" />
+      <el-pagination v-model:current-page="page" style="margin-top:12px; justify-content:flex-end" :page-size="size" :total="total" layout="prev, pager, next" @current-change="load" />
     </el-card>
 
     <el-dialog v-model="detailVisible" title="采购单详情" width="640px">

@@ -11,7 +11,7 @@
         </div>
       </template>
       <el-alert type="info" :closable="false" style="margin-bottom: 12px" title="支持传统新建/编辑，也支持上传文件触发 RAG 风控分析" />
-      <el-table :data="rows" v-loading="loading" @row-click="onRowClick">
+      <el-table v-loading="loading" :data="rows" @row-click="onRowClick">
         <el-table-column prop="title" label="合同" min-width="220" />
         <el-table-column prop="supplier_name" label="供应商" width="140" />
         <el-table-column prop="status" label="状态" width="110" />
@@ -25,7 +25,7 @@
           </template>
         </el-table-column>
       </el-table>
-      <el-pagination style="margin-top:12px; justify-content:flex-end" v-model:current-page="page" :page-size="size" :total="total" layout="prev, pager, next" @current-change="load" />
+      <el-pagination v-model:current-page="page" style="margin-top:12px; justify-content:flex-end" :page-size="size" :total="total" layout="prev, pager, next" @current-change="load" />
     </el-card>
 
     <el-dialog v-model="formVisible" :title="form.id ? '编辑合同' : '新建合同'" width="500px">

@@ -7,7 +7,7 @@
       <el-form-item><el-select v-model="q.mode" placeholder="mode" clearable style="width:120px"><el-option label="java-direct" value="java-direct" /><el-option label="python-deep" value="python-deep" /></el-select></el-form-item>
       <el-form-item><el-button @click="load">查询</el-button></el-form-item>
     </el-form>
-    <el-table :data="rows" v-loading="loading" @row-click="openDetail">
+    <el-table v-loading="loading" :data="rows" @row-click="openDetail">
       <el-table-column prop="id" label="ID" width="70" />
       <el-table-column prop="trace_id" label="Trace" width="160" />
       <el-table-column prop="username" label="用户" width="100" />
@@ -19,7 +19,7 @@
       <el-table-column prop="cost_usd" label="cost" width="100" />
       <el-table-column prop="created_at" label="时间" width="170" />
     </el-table>
-    <el-pagination style="margin-top:12px; justify-content:flex-end" v-model:current-page="page" :page-size="size" :total="total" layout="prev, pager, next" @current-change="load" />
+    <el-pagination v-model:current-page="page" style="margin-top:12px; justify-content:flex-end" :page-size="size" :total="total" layout="prev, pager, next" @current-change="load" />
     <el-dialog v-model="detailVisible" title="Trace 详情" width="700px">
       <div v-if="detail">
         <div>Trace: {{ detail.trace_id }} | 耗时 {{ detail.latency_ms }}ms | tokens {{ detail.total_tokens }} | {{ detail.token_source }}</div>

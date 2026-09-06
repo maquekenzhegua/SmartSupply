@@ -11,7 +11,7 @@
         <el-form-item><el-input v-model="keyword" placeholder="商品名搜索" clearable @keyup.enter="load" /></el-form-item>
         <el-form-item><el-button @click="load">搜索</el-button></el-form-item>
       </el-form>
-      <el-table :data="rows" v-loading="loading">
+      <el-table v-loading="loading" :data="rows">
         <el-table-column prop="name" label="商品" min-width="160" />
         <el-table-column prop="category" label="分类" width="100" />
         <el-table-column prop="unit" label="单位" width="80" />
@@ -24,7 +24,7 @@
           </template>
         </el-table-column>
       </el-table>
-      <el-pagination style="margin-top: 12px; justify-content: flex-end" v-model:current-page="page" :page-size="size" :total="total" layout="prev, pager, next" @current-change="load" />
+      <el-pagination v-model:current-page="page" style="margin-top: 12px; justify-content: flex-end" :page-size="size" :total="total" layout="prev, pager, next" @current-change="load" />
     </el-card>
 
     <el-dialog v-model="dialogVisible" :title="form.id ? '编辑商品' : '新增商品'" width="480px">

@@ -7,14 +7,14 @@
       <el-form-item><el-input v-model="skuCode" placeholder="按SKU编码过滤" clearable /></el-form-item>
       <el-form-item><el-button @click="load">查询</el-button></el-form-item>
     </el-form>
-    <el-table :data="rows" v-loading="loading">
+    <el-table v-loading="loading" :data="rows">
       <el-table-column prop="sku_code" label="SKU" width="160" />
       <el-table-column prop="warehouse_name" label="仓库" width="130" />
       <el-table-column prop="change_qty" label="变动" width="100"><template #default="{ row }"><el-tag :type="(row.change_qty as number) > 0 ? 'success' : 'danger'">{{ row.change_qty }}</el-tag></template></el-table-column>
       <el-table-column prop="reason" label="原因" min-width="200" />
       <el-table-column prop="created_at" label="时间" width="170" />
     </el-table>
-    <el-pagination style="margin-top:12px; justify-content:flex-end" v-model:current-page="page" :page-size="size" :total="total" layout="prev, pager, next" @current-change="load" />
+    <el-pagination v-model:current-page="page" style="margin-top:12px; justify-content:flex-end" :page-size="size" :total="total" layout="prev, pager, next" @current-change="load" />
     <el-dialog v-model="visible" title="库存调整" width="420px">
       <el-form label-width="90px">
         <el-form-item label="SKU ID"><el-input v-model="form.skuId" type="number" /></el-form-item>

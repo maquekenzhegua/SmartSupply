@@ -33,7 +33,7 @@
         <el-input v-model="globalQ" placeholder="全局 Ask Agent：如“华南退货最高的品类？”回车直达 Agent 工作台" style="max-width: 520px" clearable @keyup.enter="askAgent">
           <template #prepend>Ask Agent</template>
         </el-input>
-        <span style="color: #909399">admin · Mock 模式可直接演示</span>
+        <span style="color: #909399">{{ auth.username || "未登录" }} · {{ auth.role || "USER" }}</span>
       </el-header>
       <el-main style="background: #f5f7fa; overflow: auto"><router-view /></el-main>
     </el-container>

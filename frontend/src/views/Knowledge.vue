@@ -14,14 +14,14 @@
       <el-form-item><el-button @click="doRecall">召回测试</el-button></el-form-item>
     </el-form>
     <div v-if="recallCtx" style="white-space:pre-wrap; background:#fafafa; padding:12px; border-radius:8px; margin-bottom:12px">{{ recallCtx }}</div>
-    <el-table :data="rows" v-loading="loading">
+    <el-table v-loading="loading" :data="rows">
       <el-table-column prop="title" label="标题" min-width="200" />
       <el-table-column prop="source_type" label="来源" width="110" />
       <el-table-column prop="content_len" label="长度" width="90" />
       <el-table-column prop="created_at" label="创建时间" width="170" />
       <el-table-column label="操作" width="100"><template #default="{ row }"><el-button size="small" type="danger" @click="remove(row)">删除</el-button></template></el-table-column>
     </el-table>
-    <el-pagination style="margin-top:12px; justify-content:flex-end" v-model:current-page="page" :page-size="size" :total="total" layout="prev, pager, next" @current-change="load" />
+    <el-pagination v-model:current-page="page" style="margin-top:12px; justify-content:flex-end" :page-size="size" :total="total" layout="prev, pager, next" @current-change="load" />
 
     <el-dialog v-model="textDialog" title="手动录入" width="520px">
       <el-form label-width="80px"><el-form-item label="标题"><el-input v-model="form.title" /></el-form-item><el-form-item label="内容"><el-input v-model="form.content" type="textarea" :rows="6" /></el-form-item></el-form>

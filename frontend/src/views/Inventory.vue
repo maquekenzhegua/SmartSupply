@@ -2,7 +2,7 @@
   <div>
     <el-card>
       <template #header><span>库存管理</span><el-tag type="info" style="margin-left: 8px">可点 AI建议 触发补货 Agent</el-tag></template>
-      <el-table :data="rows" v-loading="loading">
+      <el-table v-loading="loading" :data="rows">
         <el-table-column prop="sku_code" label="SKU" width="160" />
         <el-table-column prop="product_name" label="商品" />
         <el-table-column prop="spec" label="规格" width="120" />
@@ -12,7 +12,7 @@
         <el-table-column label="状态" width="110"><template #default="{ row }"><el-tag :type="row.below_safety ? 'danger' : 'success'">{{ row.below_safety ? '低于安全库存' : '充足' }}</el-tag></template></el-table-column>
         <el-table-column label="操作" width="120"><template #default="{ row }"><el-button size="small" type="primary" @click="advise(row)">AI建议</el-button></template></el-table-column>
       </el-table>
-      <el-pagination style="margin-top: 12px; justify-content: flex-end" v-model:current-page="page" :page-size="size" :total="total" layout="prev, pager, next" @current-change="load" />
+      <el-pagination v-model:current-page="page" style="margin-top: 12px; justify-content: flex-end" :page-size="size" :total="total" layout="prev, pager, next" @current-change="load" />
     </el-card>
 
     <el-dialog v-model="dialogVisible" title="补货 Agent 建议" width="560px">

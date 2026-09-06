@@ -10,7 +10,7 @@
         <el-form-item><el-input v-model="keyword" placeholder="SKU编码" clearable /></el-form-item>
         <el-form-item><el-button @click="load">搜索</el-button></el-form-item>
       </el-form>
-      <el-table :data="rows" v-loading="loading">
+      <el-table v-loading="loading" :data="rows">
         <el-table-column prop="sku_code" label="SKU编码" width="170" />
         <el-table-column prop="product_name" label="商品" width="140" />
         <el-table-column prop="spec" label="规格" width="120" />
@@ -20,7 +20,7 @@
           <template #default="{ row }"><el-button size="small" @click="openDialog(row)">编辑</el-button><el-button size="small" type="danger" @click="remove(row)">删除</el-button></template>
         </el-table-column>
       </el-table>
-      <el-pagination style="margin-top: 12px; justify-content: flex-end" v-model:current-page="page" :page-size="size" :total="total" layout="prev, pager, next" @current-change="load" />
+      <el-pagination v-model:current-page="page" style="margin-top: 12px; justify-content: flex-end" :page-size="size" :total="total" layout="prev, pager, next" @current-change="load" />
     </el-card>
     <el-dialog v-model="visible" :title="form.id ? '编辑SKU' : '新增SKU'" width="500px">
       <el-form label-width="90px">
