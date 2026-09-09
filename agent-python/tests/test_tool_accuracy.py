@@ -86,7 +86,7 @@ def test_validate_calls_filters_bad_and_coerces_types():
 def test_planner_uses_native_tool_calls(monkeypatch):
     seen = {}
 
-    async def fake_chat(messages, tools=None):
+    async def fake_chat(messages, tools=None, model=None):
         seen["tools"] = tools
         return {"text": None,
                 "tool_calls": [{"name": "search_contracts", "arguments": {"keyword": "违约金"}}],
@@ -101,7 +101,7 @@ def test_planner_uses_native_tool_calls(monkeypatch):
 
 
 def test_planner_parses_json_text_fallback(monkeypatch):
-    async def fake_chat(messages, tools=None):
+    async def fake_chat(messages, tools=None, model=None):
         return {"text": '[{"tool":"list_low_stock","args":{}}]', "tool_calls": None, "provider": "openai"}
 
     monkeypatch.setattr(G, "chat", fake_chat)
@@ -111,7 +111,7 @@ def test_planner_parses_json_text_fallback(monkeypatch):
 
 def test_planner_llm_unavailable_marks_degraded_not_faked(monkeypatch):
     """LLM 不可用时如实 degraded：不再走图内关键词规则"伪装规划成功"。"""
-    async def boom(messages, tools=None):
+    async def boom(messages, tools=None, model=None):
         raise LLMUnavailable("muse /responses 调用失败: timeout", provider="muse")
 
     monkeypatch.setattr(G, "chat", boom)
@@ -151,7 +151,7 @@ def test_reasoner_all_tools_failed_honest_answer():
 
 
 def test_reasoner_reasoner_llm_down_still_returns_evidence(monkeypatch):
-    async def boom(messages, tools=None):
+    async def boom(messages, tools=None, model=None):
         raise LLMUnavailable("muse 推理截断", provider="muse")
 
     monkeypatch.setattr(G, "chat", boom)

@@ -138,6 +138,8 @@ def test_golden_schema():
     for r in rows:
         assert r["question"] and r["must_contain"], f"缺字段 {r}"
         assert isinstance(r["contexts"], list) and r["contexts"], f"contexts 缺失 {r}"
+        assert r.get("layer") in ("rag", "tool", "hitl", "injection", "extended"), \
+            f"缺分层标签 layer：{r['question'][:40]}"
 
 def test_offline_recall_and_answer_keyword_coverage():
     rows = load_golden()
@@ -162,6 +164,17 @@ def test_offline_recall_and_answer_keyword_coverage():
     # 输出供报告采集
     print(f"[GoldenEval] n={len(rows)} avg_keyword_hit={avg_hit:.3f} avg_context_recall={avg_recall:.3f}")
     print(f"[GoldenEval] hit distribution: " + ", ".join(f"{s:.2f}" for s in scores))
+
+    # 分层指标（rag/tool/hitl/injection/extended）：总量达标掩盖单层塌方——按层出数才能定位
+    from collections import defaultdict
+    by_layer: dict = defaultdict(list)
+    for r, hr, rec in zip(rows, scores, recalls):
+        by_layer[r.get("layer", "unknown")].append((hr, rec))
+    for layer in sorted(by_layer):
+        items = by_layer[layer]
+        lh = sum(x for x, _ in items) / len(items)
+        lr = sum(y for _, y in items) / len(items)
+        print(f"[GoldenEval] layer={layer} n={len(items)} avg_keyword_hit={lh:.3f} avg_context_recall={lr:.3f}")
 
     # 阈值：离线 Mock 保证下限，真 LLM 接入后显著提升
     assert avg_hit >= 0.65, f"关键词命中率过低 {avg_hit:.3f}"

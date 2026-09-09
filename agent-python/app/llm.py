@@ -15,8 +15,26 @@ sink 逐片下发，前端收到真 token 流而非整段切块。
 from typing import List, Dict, Any, Optional, AsyncIterator
 import asyncio
 import json
+import uuid
+from contextvars import ContextVar
 from . import config
 import httpx
+
+# opencode zen/go 网关要求：每次对话携带稳定会话头 x-opencode-session（路由/提示缓存优化），
+# 缺失会被网关 400 拒绝（MissingSessionID）。会话粒度：main 中间件按 sessionId 设置，
+# 直调/评测场景回退进程级稳定 ID（比"每请求一个"更利于缓存，比"无"正确）。
+_opencode_session: ContextVar[str] = ContextVar("opencode_session", default=uuid.uuid4().hex)
+
+
+def set_opencode_session(session_id: str) -> None:
+    if session_id:
+        _opencode_session.set(f"smartsupply-{session_id}"[:128])
+
+
+def _opencode_headers() -> Dict[str, str]:
+    """仅 opencode 网关需要的附加头（其他 OpenAI 兼容端点发未知头无意义）。"""
+    return {"x-opencode-session": _opencode_session.get(),
+            "User-Agent": "smartsupply-agent/1.0"}
 
 
 class LLMUnavailable(RuntimeError):
@@ -83,11 +101,12 @@ def _mock_provider(messages: List[Dict[str, str]], tools: Optional[List[Dict[str
             "tool_calls": None, "provider": "mock"}
 
 
-def _muse_spec() -> Optional[Dict[str, Any]]:
+def _muse_spec(model: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    model = model or config.AI_MODEL
     base = (config.OPENAI_BASE_URL or "https://opencode.ai/zen/go/v1").rstrip("/")
-    if "opencode" in base and "muse" in (config.AI_MODEL or ""):
+    if "opencode" in base and "muse" in (model or ""):
         return {"base": base, "key": config.OPENAI_API_KEY or config.DASHSCOPE_API_KEY,
-                "model": config.AI_MODEL or "muse-spark-1.2-contributor"}
+                "model": model or "muse-spark-1.2-contributor"}
     return None
 
 
@@ -135,7 +154,8 @@ async def _muse_responses(messages: List[Dict[str, str]], tools: Optional[List[D
                              "parameters": t["function"].get("parameters", {})} for t in tools]
     try:
         r = await _http_client().post(f"{spec['base']}/responses",
-                                      headers={"Authorization": f"Bearer {spec['key']}", "Content-Type": "application/json"},
+                                      headers={"Authorization": f"Bearer {spec['key']}", "Content-Type": "application/json",
+                                               **_opencode_headers()},
                                       json=payload)
         r.raise_for_status()
     except httpx.HTTPStatusError as e:
@@ -170,22 +190,25 @@ async def _muse_responses(messages: List[Dict[str, str]], tools: Optional[List[D
     raise LLMUnavailable("muse 返回无内容", provider="muse", model=spec["model"])
 
 
-async def _openai_chat(messages: List[Dict[str, str]], tools: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
+async def _openai_chat(messages: List[Dict[str, str]], tools: Optional[List[Dict[str, Any]]], model: Optional[str] = None) -> Dict[str, Any]:
     try:
         import openai  # type: ignore
     except ImportError as e:
-        raise LLMUnavailable(f"openai SDK 不可用: {e}", provider="openai", model=config.AI_MODEL)
+        raise LLMUnavailable(f"openai SDK 不可用: {e}", provider="openai", model=model or config.AI_MODEL)
+    use_model = model or config.AI_MODEL
+    extra_headers = _opencode_headers() if "opencode" in (config.OPENAI_BASE_URL or "") else {}
     try:
         client = openai.AsyncOpenAI(api_key=config.OPENAI_API_KEY or config.DASHSCOPE_API_KEY,
-                                    base_url=config.OPENAI_BASE_URL, timeout=config.LLM_TIMEOUT_SECONDS)
-        kwargs: Dict[str, Any] = {"model": config.AI_MODEL, "messages": messages, "temperature": 0.3}
+                                    base_url=config.OPENAI_BASE_URL, timeout=config.LLM_TIMEOUT_SECONDS,
+                                    default_headers=extra_headers)
+        kwargs: Dict[str, Any] = {"model": use_model, "messages": messages, "temperature": 0.3}
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
         resp = await client.chat.completions.create(**kwargs)
     except Exception as e:
         retryable = _openai_retryable(e)
-        raise LLMUnavailable(f"OpenAI 兼容接口调用失败: {e}", provider="openai", model=config.AI_MODEL, retryable=retryable)
+        raise LLMUnavailable(f"OpenAI 兼容接口调用失败: {e}", provider="openai", model=use_model, retryable=retryable)
     msg = resp.choices[0].message
     tool_calls = None
     if getattr(msg, "tool_calls", None):
@@ -213,19 +236,21 @@ def _openai_retryable(e: Exception) -> bool:
                           getattr(__import__("openai"), "APIConnectionError", ())))
 
 
-async def chat(messages: List[Dict[str, str]], tools: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+async def chat(messages: List[Dict[str, str]], tools: Optional[List[Dict[str, Any]]] = None,
+               model: Optional[str] = None) -> Dict[str, Any]:
     """统一入口。返回 {"text", "tool_calls", "provider", "usage"?}；真实模式失败抛 LLMUnavailable。
 
     tools: OpenAI function-calling 格式的工具定义列表；给出时 provider 可返回结构化调用。
+    model: 按调用路由模型（规划/反思走廉价档 AI_MODEL_FAST，作答走主模型）；缺省主模型。
     瞬态失败（超时/429/5xx）按指数退避自动重试，协议/内容类错误立即上抛。
     """
     if config.LLM_MODE == "mock":
         return _mock_provider(messages, tools)
-    spec = _muse_spec()
+    spec = _muse_spec(model)
     if spec:
         call = lambda: _muse_responses(messages, tools, spec)  # noqa: E731
     else:
-        call = lambda: _openai_chat(messages, tools)  # noqa: E731
+        call = lambda: _openai_chat(messages, tools, model)  # noqa: E731
     backoff = max(0.1, config.LLM_BACKOFF_SECONDS)
     last: Optional[LLMUnavailable] = None
     for attempt in range(1, max(1, config.LLM_MAX_ATTEMPTS) + 1):
@@ -243,7 +268,8 @@ async def chat(messages: List[Dict[str, str]], tools: Optional[List[Dict[str, An
 # ---- 真流式：按 provider 原生 token delta 产出 ----
 
 async def chat_stream(messages: List[Dict[str, str]], tools: Optional[List[Dict[str, Any]]] = None,
-                      usage_out: Optional[Dict[str, Any]] = None) -> AsyncIterator[str]:
+                      usage_out: Optional[Dict[str, Any]] = None,
+                      model: Optional[str] = None) -> AsyncIterator[str]:
     """逐 token delta 产出回答正文。仅用于最终回答生成（工具规划仍走非流式 chat）。
     usage_out 非空时，provider 返回真实用量则回填 {prompt_tokens, completion_tokens, source}。"""
     if config.LLM_MODE == "mock":
@@ -254,12 +280,12 @@ async def chat_stream(messages: List[Dict[str, str]], tools: Optional[List[Dict[
             yield text[i:i + 24]
             await asyncio.sleep(0)
         return
-    spec = _muse_spec()
+    spec = _muse_spec(model)
     if spec:
         async for delta in _muse_stream(messages, spec, usage_out):
             yield delta
     else:
-        async for delta in _openai_stream(messages, usage_out):
+        async for delta in _openai_stream(messages, usage_out, model):
             yield delta
 
 
@@ -273,7 +299,7 @@ async def _muse_stream(messages: List[Dict[str, str]], spec: Dict[str, Any], usa
         async with _http_client().stream(
                 "POST", f"{spec['base']}/responses",
                 headers={"Authorization": f"Bearer {spec['key']}", "Content-Type": "application/json",
-                         "Accept": "text/event-stream"},
+                         "Accept": "text/event-stream", **_opencode_headers()},
                 json=payload) as r:
             if r.status_code != 200:
                 body = (await r.aread()).decode("utf-8", "replace")[:200]
@@ -305,16 +331,20 @@ async def _muse_stream(messages: List[Dict[str, str]], spec: Dict[str, Any], usa
         raise LLMUnavailable(f"muse stream 调用失败: {e}", provider="muse", model=spec["model"], retryable=True)
 
 
-async def _openai_stream(messages: List[Dict[str, str]], usage_out: Optional[Dict[str, Any]]) -> AsyncIterator[str]:
+async def _openai_stream(messages: List[Dict[str, str]], usage_out: Optional[Dict[str, Any]],
+                         model: Optional[str] = None) -> AsyncIterator[str]:
     try:
         import openai  # type: ignore
     except ImportError as e:  # pragma: no cover
-        raise LLMUnavailable(f"openai SDK 不可用: {e}", provider="openai", model=config.AI_MODEL)
+        raise LLMUnavailable(f"openai SDK 不可用: {e}", provider="openai", model=model or config.AI_MODEL)
+    use_model = model or config.AI_MODEL
+    extra_headers = _opencode_headers() if "opencode" in (config.OPENAI_BASE_URL or "") else {}
     try:
         client = openai.AsyncOpenAI(api_key=config.OPENAI_API_KEY or config.DASHSCOPE_API_KEY,
-                                    base_url=config.OPENAI_BASE_URL, timeout=config.LLM_TIMEOUT_SECONDS)
+                                    base_url=config.OPENAI_BASE_URL, timeout=config.LLM_TIMEOUT_SECONDS,
+                                    default_headers=extra_headers)
         stream = await client.chat.completions.create(
-            model=config.AI_MODEL, messages=messages, temperature=0.3,
+            model=use_model, messages=messages, temperature=0.3,
             stream=True, stream_options={"include_usage": True})
         async for chunk in stream:
             usage = getattr(chunk, "usage", None)
@@ -329,5 +359,5 @@ async def _openai_stream(messages: List[Dict[str, str]], usage_out: Optional[Dic
                 if content:
                     yield content
     except Exception as e:
-        raise LLMUnavailable(f"OpenAI 兼容流式调用失败: {e}", provider="openai", model=config.AI_MODEL,
+        raise LLMUnavailable(f"OpenAI 兼容流式调用失败: {e}", provider="openai", model=use_model,
                              retryable=_openai_retryable(e))

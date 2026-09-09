@@ -22,6 +22,20 @@ def _getattr_impl(name: str):
         return _get("OPENAI_BASE_URL", "https://api.openai.com/v1")
     if name == "AI_MODEL":
         return _get("AI_MODEL", "gpt-4o-mini")
+    if name == "AI_MODEL_FAST":
+        # 廉价档模型：planner/reflector 等轻任务路由到此档（成本分级）；
+        # 未配置时回退主模型——零配置行为不变，配了才生效
+        return _get("AI_MODEL_FAST", "") or _get("AI_MODEL", "gpt-4o-mini")
+    if name == "RUN_TOKEN_BUDGET":
+        # 单次运行 token 预算（prompt+completion 合计，含估算）：超限提前收敛作答。0=不限
+        return int(_get("RUN_TOKEN_BUDGET", "0"))
+    if name == "AGENT_TOKEN_BUDGETS":
+        # 按 agent_type 覆盖预算：{"replenishment": 60000}；优先级高于 RUN_TOKEN_BUDGET
+        import json as _json
+        try:
+            return _json.loads(_get("AGENT_TOKEN_BUDGETS", "{}") or "{}")
+        except Exception:
+            return {}
     if name == "LLM_MODE":
         # 未配置任何 Key 即为离线 mock 态；每次访问即时判定，env 变更即刻生效
         return "mock" if not (_get("OPENAI_API_KEY") or _get("DASHSCOPE_API_KEY")) else "real"
@@ -29,11 +43,13 @@ def _getattr_impl(name: str):
     if name == "JAVA_JWT_TOKEN":
         return _get("JAVA_JWT_TOKEN", "")
     # 兜底服务账号：既无用户 JWT 透传（Java /chat 默认会透传真实用户 token）也未配
-    # JAVA_JWT_TOKEN 时，边车用此账号自动登录换取 token；失效自动刷新。仅演示/开发用途。
+    # JAVA_JWT_TOKEN 时，边车用此账号自动登录换取 token；失效自动刷新。
+    # 安全修复：默认留空（fail-closed）——不再内置 admin/admin123 弱口令；未显式配置时
+    # 边车直调场景的工具回环如实失败（401 信封），需要该能力须显式设置账号。
     if name == "SIDECAR_USERNAME":
-        return _get("SIDECAR_USERNAME", "admin")
+        return _get("SIDECAR_USERNAME", "")
     if name == "SIDECAR_PASSWORD":
-        return _get("SIDECAR_PASSWORD", "admin123")
+        return _get("SIDECAR_PASSWORD", "")
     # 边车自身 API 鉴权：配置后 /api/reason* 要求 X-Api-Key 匹配（Java↔边车内网共享密钥）
     if name == "SIDECAR_API_KEY":
         return _get("SIDECAR_API_KEY", "")
@@ -44,6 +60,9 @@ def _getattr_impl(name: str):
         return float(_get("LLM_BACKOFF_SECONDS", "0.8"))
     if name == "LLM_TIMEOUT_SECONDS":
         return float(_get("LLM_TIMEOUT_SECONDS", "240"))
+    # ReAct 最大迭代轮数：此前硬编码 6，轮数与成本/延迟直接相关，应可按环境调整
+    if name == "MAX_ITERATIONS":
+        return int(_get("MAX_ITERATIONS", "6"))
     # Langfuse 可观测性：不配置即整体禁用（observability 返回 no-op，零依赖零开销）
     if name == "LANGFUSE_PUBLIC_KEY":
         return _get("LANGFUSE_PUBLIC_KEY", "")

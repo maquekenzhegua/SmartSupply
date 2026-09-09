@@ -44,11 +44,17 @@ async def _ensure_service_token() -> str:
         return config.JAVA_JWT_TOKEN
     if _svc_token:
         return _svc_token
+    if not (config.SIDECAR_USERNAME and config.SIDECAR_PASSWORD):
+        # fail-closed：服务账号未显式配置时不再自动登录（旧默认 admin/admin123 已移除）。
+        # 返回空 token → 回环请求以无鉴权发起，Java 返回 401 → ok=False 错误信封如实上报，
+        # 绝不用弱默认口令悄悄换取高权限身份。
+        return ""
     async with _svc_token_lock:
         if _svc_token:  # 双检：等锁期间可能已被刷新
             return _svc_token
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
+            # trust_env=False：登录回环与工具回环同理，绝不走系统代理
+            async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
                 r = await client.post(f"{config.JAVA_API_BASE.rstrip('/')}/api/auth/login",
                                       json={"username": config.SIDECAR_USERNAME, "password": config.SIDECAR_PASSWORD})
                 if r.status_code == 200:
@@ -87,9 +93,11 @@ async def _java_request(client, method: str, url: str, params, json_body):
 async def call_java_tool(path: str, method: str = "GET", params: Dict[str, Any] = None, json: Dict[str, Any] = None,
                          timeout_s: float = 8.0) -> Any:
     """调用 Java 只读 API。成功返回解包后的 data；任何非 200 返回 {"error", "auth_failed"}，
-    连接层异常直接抛出（由 tool_* 统一转成 ok=False 错误信封）。"""
+    连接层异常直接抛出（由 tool_* 统一转成 ok=False 错误信封）。
+    trust_env=False：内网回环绝不经系统代理（Windows 上 httpx 会经 getproxies() 读
+    WinINET 注册表代理，把 localhost:8080 送进代理后拿到裸 502——实跑踩坑）。"""
     url = f"{config.JAVA_API_BASE.rstrip('/')}{path}"
-    async with httpx.AsyncClient(timeout=timeout_s) as client:
+    async with httpx.AsyncClient(timeout=timeout_s, trust_env=False) as client:
         r = await _java_request(client, method, url, params, json)
         if r.status_code != 200:
             return {"error": f"Java API {r.status_code}: {r.text[:500]}", "auth_failed": r.status_code in (401, 403)}

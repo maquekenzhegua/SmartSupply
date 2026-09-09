@@ -8,14 +8,22 @@ import json as _json
 import time, uuid
 
 from . import config
-from .graph import run_reasoning, run_reasoning_with_trace, resume_reasoning, stream_reasoning_events
-from .llm import chat
+from .graph import run_reasoning, run_reasoning_with_trace, resume_reasoning, stream_reasoning_events, MAX_ITERS
+from .llm import chat, set_opencode_session
 from .tools import TOOL_DEFS
 from .rerank import rerank as py_rerank
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # 启动即声明安全态势：未配置 X-Api-Key 时 /api/reason* 对可达方完全开放，
+    # 且无用户 token 透传的工具回环将 fail-closed（服务账号须显式配置）。
+    # 内网可信假设必须显式成立，而不是悄悄裸奔。
+    if not config.SIDECAR_API_KEY:
+        import logging
+        logging.getLogger("uvicorn.error").warning(
+            "SIDECAR_API_KEY 未配置：/api/reason* 无边车鉴权，任何可达 8001 端口的一方都可驱动 agent；"
+            "生产/共享网络环境必须配置该密钥（Java 侧同配 AGENT_PYTHON_API_KEY）")
     yield
     # 优雅关闭：checkpointer 走 Postgres 时释放连接池（MemorySaver 时为 no-op）
     from . import checkpointing
@@ -73,7 +81,14 @@ class RecallRequest(BaseModel):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "ts": int(time.time()), "mode": "langgraph-react", "maxIters": 6, "tools": [t["name"] for t in TOOL_DEFS]}
+    from . import prompts
+    return {"status": "ok", "ts": int(time.time()), "mode": "langgraph-react", "maxIters": MAX_ITERS,
+            "tools": [t["name"] for t in TOOL_DEFS],
+            "promptVersions": {"planner": prompts.PLANNER[0], "reflector": prompts.REFLECTOR[0]},
+            "modelRouting": {"main": config.AI_MODEL, "fast": config.AI_MODEL_FAST},
+            "runTokenBudget": config.RUN_TOKEN_BUDGET,
+            "auth": {"sidecarApiKeyConfigured": bool(config.SIDECAR_API_KEY),
+                     "serviceAccountConfigured": bool(config.JAVA_JWT_TOKEN or (config.SIDECAR_USERNAME and config.SIDECAR_PASSWORD))}}
 
 
 @app.get("/tools")
@@ -83,6 +98,7 @@ async def tools():
 
 @app.post("/api/reason", dependencies=[Depends(require_api_key)])
 async def reason(req: ReasonRequest, request: Request):
+    set_opencode_session(req.sessionId)
     try:
         if req.resume is not None and req.threadId:
             data = await resume_reasoning(req.threadId, req.resume, req.agentType, req.sessionId)
@@ -90,12 +106,17 @@ async def reason(req: ReasonRequest, request: Request):
             data = await run_reasoning_with_trace(req.messages, req.agentType, req.sessionId)
         # snake_case fallback for Java side；degraded 让 Java 端能区分"推理完成"与"降级产物"；
         # usage 为 provider 真实用量（source=actual），缺失时 Java 侧回退估算并标 estimated；
+        # usage_total 为全节点（planner/reflector/reasoner）按模型累计的用量与成本口径来源；
+        # budget/prompt_versions 支撑成本预算与提示词版本归因；
         # interrupted=True 表示写闸门挂起等人工批准，confirm 为待批准动作，thread_id 用于恢复
         return {"reply": data["reply"], "agentType": req.agentType, "sessionId": req.sessionId,
                 "trace": data["trace"], "tool_results": data["tool_results"], "toolResults": data["tool_results"],
                 "iters": data["iters"], "mode": "langgraph-react",
                 "degraded": data["degraded"], "degrade_reason": data["degrade_reason"],
                 "usage": data.get("usage") or {},
+                "usage_total": data.get("usage_total") or {},
+                "budget": data.get("budget") or {},
+                "prompt_versions": data.get("prompt_versions") or {},
                 "threadId": data.get("thread_id") or "",
                 "interrupted": bool(data.get("interrupted")),
                 "confirm": data.get("confirm") or []}
@@ -111,6 +132,7 @@ async def reason_stream(req: ReasonRequest, request: Request):
     Java 端逐事件转发给前端；reply_delta 为 provider 原生 token 增量（真流式），
     兼容旧调用方仍保留整段 reply 事件。写闸门挂起时下发 confirm_required 事件 +
     done(interrupted=true, thread_id)，调用方携 resume 恢复。"""
+    set_opencode_session(req.sessionId)
     async def gen():
         try:
             if req.resume is not None and req.threadId:

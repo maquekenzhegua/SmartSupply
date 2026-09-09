@@ -20,7 +20,7 @@ WRITE_ARGS = {"supplier_id": 1, "sku_code": "SKU-T001-WH-M", "quantity": 100, "u
 
 
 def _patch_llm_plan_write(monkeypatch):
-    async def fake_chat(messages, tools=None):
+    async def fake_chat(messages, tools=None, model=None):
         last = messages[-1].get("content") or ""
         if tools:
             if "已有工具结果" in last:
@@ -30,7 +30,7 @@ def _patch_llm_plan_write(monkeypatch):
                     "provider": "stub"}
         return {"text": "[Mock] 采购单已创建", "tool_calls": None, "provider": "stub"}
 
-    async def fake_stream(messages, usage_out=None):
+    async def fake_stream(messages, usage_out=None, model=None):
         for ch in ["已", "创", "建"]:
             yield ch
 

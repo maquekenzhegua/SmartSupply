@@ -8,6 +8,16 @@
 - 同一批规划出的工具调用 asyncio.gather 并行执行（此前串行 for 循环，多工具取证延迟叠加）。
 - SSE 场景下 reasoner 经 _reply_sink 逐 token 下发（llm.chat_stream 原生流式），
   非流式路径行为不变。
+- 模型路由（成本分级）：planner/reflector 走廉价档 AI_MODEL_FAST，reasoner 走主模型；
+  全节点用量按模型累计进 usage_total.by_model（真实回传优先，估算显式标注），随响应/
+  done 事件上报，Java 侧按模型查价格表计成本。
+- 单次运行预算：RUN_TOKEN_BUDGET / AGENT_TOKEN_BUDGETS（按 agent_type 覆盖），planner
+  每轮检查，超限不再调 LLM 提前收敛作答（budget_exhausted 如实标注，不算 degraded）。
+- agent_type 差异化：AGENT_TOOLSETS 定义各角色允许工具（bi 严格只读），tool_specs 过滤
+  可见工具 + _validate_calls 拦越权调用（tool-not-allowed-for-agent）。
+- 人设来源：messages[0] 的 system（Java PromptRegistry，DB 发布即生效）优先，否则
+  app/prompts.py 内置 persona 兜底；prompt_versions（planner/reflector/persona 版本 +
+  来源）随 trace/响应上报，评测可按版本归因。
 - HITL 写闸门（主流 interrupt/resume 模式）：写工具（create_purchase_order）在图内
   write_tools 节点执行前经 langgraph interrupt() 挂起，把待批准动作抛给调用方；
   调用方携 Command(resume={"approved": ...}) + 同一 thread_id 恢复执行。
@@ -29,6 +39,7 @@ from langgraph.types import interrupt, Command
 from . import config
 from . import checkpointing
 from . import observability as obs
+from . import prompts as prompts_mod
 from .llm import chat, chat_stream, usage_or_estimate, LLMUnavailable
 from .tools import (
     tool_list_low_stock, tool_get_inventory, tool_list_suppliers,
@@ -36,7 +47,9 @@ from .tools import (
     tool_search_knowledge, tool_create_purchase_order,
 )
 
-MAX_ITERS = 6
+# ReAct 最大迭代轮数：可经 MAX_ITERATIONS 环境变量调整（默认 6）。轮数直接决定
+# 取证深度与 token 成本上限，不应硬编码；planner/reflector 每轮推进 iters 并在此封顶。
+MAX_ITERS = max(1, int(getattr(config, "MAX_ITERATIONS", 6) or 6))
 
 # 写工具集合：图内单独节点执行，执行前 interrupt() 挂起等人工批准（HITL 决策层）。
 # 执行层的权限/幂等/校验仍在 Java 可信层（ADMIN 角色 + 幂等键 + DRAFT 状态）。
@@ -80,19 +93,38 @@ TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                               "required": ["supplier_id", "sku_code", "quantity", "unit_price"]},
 }
 
+# 差异化工具集（agent_type → 允许集合；None=全量）：
+#   contract 聚焦知识/合同取证；bi 严格只读（连规划层都拿不到写工具，HITL 之前多一道闸）；
+#   replenishment 含写工具（仍过图内 interrupt 人工闸门）；general 全量。
+AGENT_TOOLSETS: Dict[str, Optional[set]] = {
+    "contract": {"search_knowledge", "search_contracts", "get_contract_risk"},
+    "replenishment": {"list_low_stock", "get_inventory", "list_suppliers", "search_catalog",
+                      "search_knowledge", "create_purchase_order"},
+    "bi": {"list_low_stock", "get_inventory", "list_suppliers", "search_catalog"},
+    "general": None,
+}
 
-def tool_specs() -> List[Dict[str, Any]]:
-    """OpenAI function-calling 格式的工具定义，供 planner/reflector 传给 LLM。"""
+
+def _allowed_tools(agent_type: str) -> Optional[set]:
+    key = (agent_type or "general").strip().lower()
+    return AGENT_TOOLSETS.get(key, AGENT_TOOLSETS["general"])
+
+
+def tool_specs(agent_type: str = "general") -> List[Dict[str, Any]]:
+    """OpenAI function-calling 格式的工具定义，供 planner/reflector 传给 LLM。
+    按 agent_type 过滤：规划器只能看见该角色允许的工具，越权调用在 _validate_calls 再拦一道。"""
+    allowed = _allowed_tools(agent_type)
     return [{"type": "function", "function": {
         "name": name,
         "description": s["description"],
         "parameters": {"type": "object", "properties": s["properties"], "required": s.get("required", [])},
-    }} for name, s in TOOL_SCHEMAS.items()]
+    }} for name, s in TOOL_SCHEMAS.items() if allowed is None or name in allowed]
 
 
-def _validate_calls(raw_calls: List[Dict[str, Any]]) -> tuple:
+def _validate_calls(raw_calls: List[Dict[str, Any]], allowed: Optional[set] = None) -> tuple:
     """校验/纠正模型给出的工具名与参数。返回 (合法调用列表, 被丢弃项说明)。
-    非法工具名、缺必填参数直接丢弃；int 参数尽力转换（"3"->3），转换失败丢弃。
+    非法工具名、缺必填参数直接丢弃；int 参数尽力转换（"3"->3），转换失败丢弃；
+    allowed 非空时，角色不允许的工具同样丢弃（agent_type 差异化的第二道闸）。
     绝不伪造默认参数值（旧实现把坏 contract_id 静默改成 1，会把错误对象说成正确结论）。"""
     valid, dropped = [], []
     for c in raw_calls or []:
@@ -102,6 +134,9 @@ def _validate_calls(raw_calls: List[Dict[str, Any]]) -> tuple:
         name = c.get("tool") or c.get("name")
         if name not in TOOL_REGISTRY:
             dropped.append({"call": str(name)[:60], "reason": "unknown-tool"})
+            continue
+        if allowed is not None and name not in allowed:
+            dropped.append({"call": str(name)[:60], "reason": "tool-not-allowed-for-agent"})
             continue
         schema = TOOL_SCHEMAS[name]
         args_in = c.get("args") if isinstance(c.get("args"), dict) else c.get("arguments")
@@ -134,7 +169,11 @@ def _validate_calls(raw_calls: List[Dict[str, Any]]) -> tuple:
             dropped.append({"call": name, "reason": bad})
             continue
         valid.append({"tool": name, "args": args})
-    return valid[:4], dropped
+    # 单批上限截断必须留痕：静默丢弃会让"模型规划了但没执行"被误读为"模型只规划了这些"
+    if len(valid) > 4:
+        dropped.append({"call": f"{len(valid) - 4} call(s)", "reason": "over-batch-limit:max4"})
+        valid = valid[:4]
+    return valid, dropped
 
 
 def _extract_json_array(text: str) -> Optional[List[Any]]:
@@ -160,18 +199,13 @@ class AgentState(TypedDict, total=False):
     degraded: bool
     degrade_reason: str
     usage: Dict[str, Any]
+    usage_total: Dict[str, Any]
+    budget_exhausted: bool
+    prompt_versions: Dict[str, str]
 
 
-SYSTEM_PLANNER = """你是供应链 ReAct 规划器。基于用户最新消息与已有工具结果决定下一步取证动作。
-优先通过 function-calling 返回工具调用；判断无需工具或信息已足够时，输出 []。
-每次最多选择 4 个互补的工具调用，参数必须来自用户消息或已有结果，不得臆造。
-涉及制度/规范/条款类问题优先用 search_knowledge 检索知识库。
-用户明确要求创建采购单/下单时规划 create_purchase_order，参数需完整（供应商ID/SKU/数量/单价）；
-该工具执行前系统会自动挂起等待人工批准，无需额外确认动作。"""
-
-REFLECT_SYSTEM = """你是反思器。检查已有工具结果是否足以回答用户问题。
-若缺关键信息，通过 function-calling 补调工具（不得重复已成功的调用）；若足够，输出 []。
-"""
+SYSTEM_PLANNER = prompts_mod.PLANNER[1]   # 兼容旧引用；版本化定义见 app/prompts.py
+REFLECT_SYSTEM = prompts_mod.REFLECTOR[1]
 
 # SSE 回答流式下沉点：stream_reasoning_events 设置，reasoner 检测到即走真流式
 _reply_sink: ContextVar[Optional[Callable[[str], None]]] = ContextVar("reply_sink", default=None)
@@ -180,20 +214,78 @@ _reply_sink: ContextVar[Optional[Callable[[str], None]]] = ContextVar("reply_sin
 _obs_trace: ContextVar[Optional[Any]] = ContextVar("obs_trace", default=None)
 
 
-async def _plan_calls(prompt_system: str, task_hint: str, history: List[Dict[str, Any]]) -> tuple:
-    """planner/reflector 共用：向 LLM 要结构化调用。返回 (calls, provider, error)。"""
+def _persona_system(messages: List[Dict[str, str]], agent_type: str) -> tuple:
+    """人设来源优先级：Java PromptRegistry（messages[0] 的 system 人设，DB 发布即生效）
+    > 内置兜底（直调边车/MCP/测试场景）。返回 (人设文本, 来源)。"""
+    if messages:
+        first = messages[0] or {}
+        if first.get("role") == "system" and first.get("content"):
+            return str(first["content"]), "java-registry"
+    return prompts_mod.persona_for(agent_type)[1], "builtin"
+
+
+def _budget_for(agent_type: str) -> int:
+    """单次运行 token 预算：agent_type 覆盖优先，缺省全局 RUN_TOKEN_BUDGET；0=不限。"""
+    custom = getattr(config, "AGENT_TOKEN_BUDGETS", {}) or {}
+    key = (agent_type or "general").strip().lower()
+    if key in custom:
+        try:
+            return int(custom[key])
+        except (TypeError, ValueError):
+            pass
+    return int(getattr(config, "RUN_TOKEN_BUDGET", 0) or 0)
+
+
+def _used_tokens(usage_total: Optional[Dict[str, Any]]) -> int:
+    t = usage_total or {}
+    return int(t.get("prompt_tokens", 0)) + int(t.get("completion_tokens", 0))
+
+
+def _accumulate_usage(total: Optional[Dict[str, Any]], model: str, usage: Optional[Dict[str, Any]],
+                      prompt_text: str = "", completion_text: str = "") -> Dict[str, Any]:
+    """按模型累计运行用量：真实回传优先，缺失本地估算（估算进预算口径但显式标 source=estimated；
+    任一分量被估算过，该模型槽位整体标 estimated——不把估算伪装成真实用量）。"""
+    u = usage_or_estimate(usage, prompt_text, completion_text)
+    out = dict(total or {})
+    out["prompt_tokens"] = int(out.get("prompt_tokens", 0)) + int(u.get("prompt_tokens", 0))
+    out["completion_tokens"] = int(out.get("completion_tokens", 0)) + int(u.get("completion_tokens", 0))
+    by_model = dict(out.get("by_model") or {})
+    slot = dict(by_model.get(model) or {})
+    prev_actual = slot.get("source") == "actual"
+    slot["prompt_tokens"] = int(slot.get("prompt_tokens", 0)) + int(u.get("prompt_tokens", 0))
+    slot["completion_tokens"] = int(slot.get("completion_tokens", 0)) + int(u.get("completion_tokens", 0))
+    slot["source"] = "actual" if (u.get("source") == "actual" and (prev_actual or not slot.get("source"))) else "estimated"
+    by_model[model] = slot
+    out["by_model"] = by_model
+    return out
+
+
+async def _plan_calls(prompt_system: str, task_hint: str, history: List[Dict[str, Any]],
+                      agent_type: str = "general") -> tuple:
+    """planner/reflector 共用：向 LLM 要结构化调用。
+    返回 (calls, provider, note, usage_delta)；usage_delta 为本次调用的用量观测（供累计进 usage_total）。
+    模型路由：规划/反思是轻任务，走廉价档 AI_MODEL_FAST（未配置时=主模型，零配置行为不变）。"""
     reflector_mode = bool(history)
+    fast_model = config.AI_MODEL_FAST
+    # 历史工具结果序列化带预算截断：截断必须显式标注（与 _digest_results 同一口径），
+    # 否则反思器会把"被截断的残缺证据"当成完整证据得出虚假的"信息已足够"
+    hist_json = ""
+    if history:
+        hist_json = json.dumps(history, ensure_ascii=False, default=str)
+        if len(hist_json) > 4000:
+            hist_json = hist_json[:4000] + "…[历史工具结果过长已截断，缺失部分需重新取证]"
     planner_messages = [
         {"role": "system", "content": prompt_system},
         {"role": "user", "content": task_hint + (
-            f"\n已有工具结果：{json.dumps(history, ensure_ascii=False, default=str)[:4000]}" if history else "")},
+            f"\n已有工具结果：{hist_json}" if history else "")},
     ]
+    prompt_text = "\n".join(str(m.get("content") or "") for m in planner_messages)
     try:
-        res = await chat(planner_messages, tools=tool_specs())
+        res = await chat(planner_messages, tools=tool_specs(agent_type), model=fast_model)
     except LLMUnavailable as e:
-        return [], "unavailable", str(e)
+        return [], "unavailable", str(e), {}
     except Exception as e:  # provider 协议外异常同样如实上报，绝不伪装成规划成功
-        return [], "error", str(e)
+        return [], "error", str(e), {}
     provider = res.get("provider", "")
     calls_raw = res.get("tool_calls")
     if calls_raw is None:
@@ -202,17 +294,13 @@ async def _plan_calls(prompt_system: str, task_hint: str, history: List[Dict[str
         if reflector_mode and text and not text.startswith("["):
             # 反思器输出非 JSON 时无法甄别其意图，按"足够"收敛（保守：不补调），如实记录
             provider += "+unparsed"
-    calls, dropped = _validate_calls([c for c in calls_raw if isinstance(c, dict)])
+    calls, dropped = _validate_calls([c for c in calls_raw if isinstance(c, dict)], _allowed_tools(agent_type))
     note = "dropped:" + json.dumps(dropped, ensure_ascii=False, default=str)[:300] if dropped else ""
-    # 规划/反思本身也是 LLM 调用：以 generation 记入 Langfuse（禁用时 no-op）。
-    # 此前漏传 usage 导致 trace 里 planner/reflector 永远无 token 数，即使 provider 回传了
+    # 规划/反思本身也是 LLM 调用：以 generation 记入 Langfuse（禁用时 no-op），模型名=实际路由档位
+    usage_delta = usage_or_estimate(res.get("usage"), prompt_text, json.dumps(calls, ensure_ascii=False))
     obs.generation(_obs_trace.get(), "reflector-llm" if reflector_mode else "planner-llm",
-                   config.AI_MODEL, task_hint, {"calls": calls, "note": note},
-                   usage=usage_or_estimate(
-                       res.get("usage"),
-                       "\n".join(str(m.get("content") or "") for m in planner_messages),
-                       json.dumps(calls, ensure_ascii=False)))
-    return calls, provider, note
+                   fast_model, task_hint, {"calls": calls, "note": note}, usage=usage_delta)
+    return calls, provider, note, usage_delta
 
 
 async def planner(state: AgentState) -> Dict[str, Any]:
@@ -225,13 +313,36 @@ async def planner(state: AgentState) -> Dict[str, Any]:
     history = state.get("tool_results") or []
     agent_type = state.get("agent_type") or "general"
 
-    task_hint = f"agent_type={agent_type}\n用户消息：{last}"
-    calls, provider, note = await _plan_calls(SYSTEM_PLANNER, task_hint, history)
-    entry: Dict[str, Any] = {"node": "planner", "provider": provider, "calls": calls}
+    persona_text, persona_source = _persona_system(msgs, agent_type)
+    system_prompt = persona_text + "\n\n" + prompts_mod.PLANNER[1]
+
+    # 单次运行预算闸门：超限提前收敛作答（策略性收口，不算 degraded，但如实标注）
+    limit = _budget_for(agent_type)
+    used = _used_tokens(state.get("usage_total"))
+    budget_exhausted = limit > 0 and used >= limit
+
+    if budget_exhausted:
+        calls, provider, note = [], "budget-gate", f"token budget {limit} exhausted ({used} used)"
+        usage_delta = {}
+    else:
+        task_hint = f"agent_type={agent_type}\n用户消息：{last}"
+        calls, provider, note, usage_delta = await _plan_calls(system_prompt, task_hint, history, agent_type)
+    usage_total = _accumulate_usage(state.get("usage_total"), config.AI_MODEL_FAST, usage_delta)
+    usage_total = usage_total if isinstance(usage_total, dict) else {}
+    # usage_or_estimate 返回的 delta 缺 model 归属时按 fast 档累计（_accumulate_usage 第二参）
+
+    entry: Dict[str, Any] = {"node": "planner", "provider": provider, "calls": calls,
+                             "prompt_versions": prompts_mod.versions(agent_type, persona_source)}
     if note:
         entry["note"] = note
+    if budget_exhausted:
+        entry["budget"] = {"limit": limit, "used": used, "action": "stop_collecting"}
     trace.append(entry)
-    update: Dict[str, Any] = {"pending_tool_calls": calls, "trace": trace, "iters": iters + 1}
+    update: Dict[str, Any] = {"pending_tool_calls": calls, "trace": trace, "iters": iters + 1,
+                              "usage_total": usage_total, "prompt_versions": entry["prompt_versions"],
+                              "budget_exhausted": budget_exhausted}
+    if budget_exhausted:
+        update["budget"] = {"limit": limit, "used": used, "action": "stop_collecting"}
     if provider in ("unavailable", "error"):
         update.update({"degraded": True, "degrade_reason": f"规划阶段 LLM 不可用: {note or provider}"})
     return update
@@ -334,11 +445,17 @@ async def reflector(state: AgentState) -> Dict[str, Any]:
     msgs = list(state.get("messages") or [])
     last = msgs[-1]["content"] if msgs else ""
     tool_results = state.get("tool_results") or []
+    agent_type = state.get("agent_type") or "general"
+
+    persona_text, persona_source = _persona_system(msgs, agent_type)
+    system_prompt = persona_text + "\n\n" + prompts_mod.REFLECTOR[1]
 
     done = {(r.get("tool"), json.dumps(r.get("args"), ensure_ascii=False, sort_keys=True, default=str)) for r in tool_results}
-    calls, provider, note = await _plan_calls(
-        REFLECT_SYSTEM, f"用户消息：{last}",
-        [{"tool": r.get("tool"), "args": r.get("args"), "ok": r.get("ok")} for r in tool_results])
+    calls, provider, note, usage_delta = await _plan_calls(
+        system_prompt, f"用户消息：{last}",
+        [{"tool": r.get("tool"), "args": r.get("args"), "ok": r.get("ok")} for r in tool_results],
+        agent_type)
+    usage_total = _accumulate_usage(state.get("usage_total"), config.AI_MODEL_FAST, usage_delta)
     filtered = [c for c in calls
                 if (c["tool"], json.dumps(c["args"], ensure_ascii=False, sort_keys=True)) not in done]
     entry: Dict[str, Any] = {"node": "reflector", "provider": provider, "calls": filtered[:3]}
@@ -347,7 +464,7 @@ async def reflector(state: AgentState) -> Dict[str, Any]:
     trace.append(entry)
     obs.span(_obs_trace.get(), "reflector", input={"tool_results": len(tool_results)},
              output={"calls": filtered[:3], "provider": provider}, metadata={"node": "reflector"})
-    update: Dict[str, Any] = {"pending_tool_calls": filtered[:3], "trace": trace}
+    update: Dict[str, Any] = {"pending_tool_calls": filtered[:3], "trace": trace, "usage_total": usage_total}
     if provider in ("unavailable", "error"):
         update.update({"degraded": True, "degrade_reason": f"反思阶段 LLM 不可用: {note or provider}"})
     return update
@@ -402,6 +519,10 @@ async def reasoner(state: AgentState) -> Dict[str, Any]:
     if failures:
         extra.append("注意：以下取证调用失败了，涉及的部分请如实声明'未能查询到/数据源暂不可用'，不得编造：\n" + "\n".join(
             f"- {r['tool']}({json.dumps(r['args'], ensure_ascii=False, default=str)}): {str(r['result'].get('error'))[:160]}" for r in failures))
+    if state.get("budget_exhausted"):
+        msgs = msgs + [{"role": "system", "content":
+                        "（提示：已达单次运行 token 预算，取证阶段被提前收敛。请基于现有证据作答，"
+                        "并如实说明信息可能不完整，不要为完整性编造数据。）"}]
     if extra:
         msgs = msgs + [{"role": "system", "content": "\n\n".join(extra)}]
 
@@ -411,7 +532,7 @@ async def reasoner(state: AgentState) -> Dict[str, Any]:
         usage_box: Dict[str, Any] = {}
         parts: List[str] = []
         try:
-            async for delta in chat_stream(msgs, usage_out=usage_box):
+            async for delta in chat_stream(msgs, usage_out=usage_box, model=config.AI_MODEL):
                 parts.append(delta)
                 sink(delta)
         except LLMUnavailable as e:
@@ -423,6 +544,9 @@ async def reasoner(state: AgentState) -> Dict[str, Any]:
         update: Dict[str, Any] = {"final": "".join(parts), "trace": trace}
         if usage_box:
             update["usage"] = usage_box
+        update["usage_total"] = _accumulate_usage(
+            state.get("usage_total"), config.AI_MODEL, usage_box,
+            "\n".join(str(m.get("content") or "") for m in msgs), update["final"])
         obs.generation(_obs_trace.get(), "reasoner", config.AI_MODEL,
                        {"messages": len(msgs)}, update["final"],
                        usage=usage_or_estimate(usage_box,
@@ -431,7 +555,7 @@ async def reasoner(state: AgentState) -> Dict[str, Any]:
         return update
 
     try:
-        reply = await chat(msgs)
+        reply = await chat(msgs, model=config.AI_MODEL)
     except LLMUnavailable as e:
         digest = _digest_results(successes, max_chars=2000)
         return {"final": f"（语言模型暂不可用：{e}。以下为工具直查结果，未经模型组织）\n{digest or '无可用的工具结果。'}",
@@ -439,6 +563,9 @@ async def reasoner(state: AgentState) -> Dict[str, Any]:
     update = {"final": reply.get("text") or "", "trace": trace}
     if reply.get("usage"):
         update["usage"] = reply["usage"]
+    update["usage_total"] = _accumulate_usage(
+        state.get("usage_total"), config.AI_MODEL, reply.get("usage"),
+        "\n".join(str(m.get("content") or "") for m in msgs), update["final"])
     obs.generation(_obs_trace.get(), "reasoner", config.AI_MODEL,
                    {"messages": len(msgs)}, update["final"],
                    usage=usage_or_estimate(reply.get("usage"),
@@ -450,7 +577,7 @@ async def reasoner(state: AgentState) -> Dict[str, Any]:
 def should_continue_after_reflect(state: AgentState) -> Literal["tools", "reason"]:
     calls = state.get("pending_tool_calls") or []
     iters = int(state.get("iters") or 0)
-    if calls and iters < MAX_ITERS:
+    if calls and iters < MAX_ITERS and not state.get("budget_exhausted"):
         return "tools"
     return "reason"
 
@@ -491,7 +618,13 @@ def _fresh_state(messages: List[Dict[str, str]], agent_type: str) -> Dict[str, A
     """每次调用独立初始状态（不可共享可变默认值，避免并发串号）。"""
     return {"messages": list(messages), "agent_type": agent_type, "tool_results": [], "trace": [],
             "iters": 0, "pending_tool_calls": [], "pending_write_calls": [], "final": "",
-            "degraded": False, "degrade_reason": "", "usage": {}}
+            "degraded": False, "degrade_reason": "", "usage": {},
+            "usage_total": {}, "budget_exhausted": False, "prompt_versions": {}}
+
+
+def _budget_summary(state: Dict[str, Any], agent_type: str) -> Dict[str, Any]:
+    return {"limit": _budget_for(agent_type), "used": _used_tokens(state.get("usage_total")),
+            "exhausted": bool(state.get("budget_exhausted"))}
 
 
 def new_thread_id(session_id: str = "") -> str:
@@ -533,11 +666,17 @@ async def run_reasoning_with_trace(messages: List[Dict[str, str]], agent_type: s
         confirm = _extract_interrupts(result)
         return {"reply": "", "trace": result.get("trace") or [], "tool_results": result.get("tool_results") or [],
                 "iters": int(result.get("iters") or 0), "degraded": False, "degrade_reason": "",
-                "usage": {}, "interrupted": True, "confirm": confirm, "thread_id": tid}
+                "usage": {}, "interrupted": True, "confirm": confirm, "thread_id": tid,
+                "usage_total": result.get("usage_total") or {},
+                "budget": _budget_summary(result, agent_type),
+                "prompt_versions": result.get("prompt_versions") or {}}
     return {"reply": result.get("final", ""), "trace": result.get("trace") or [],
             "tool_results": result.get("tool_results") or [], "iters": int(result.get("iters") or 0),
             "degraded": bool(result.get("degraded")), "degrade_reason": result.get("degrade_reason") or "",
-            "usage": result.get("usage") or {}, "interrupted": False, "thread_id": tid}
+            "usage": result.get("usage") or {}, "interrupted": False, "thread_id": tid,
+            "usage_total": result.get("usage_total") or {},
+            "budget": _budget_summary(result, agent_type),
+            "prompt_versions": result.get("prompt_versions") or {}}
 
 
 async def resume_reasoning(thread_id: str, resume_value: Any, agent_type: str = "general",
@@ -563,11 +702,17 @@ async def resume_reasoning(thread_id: str, resume_value: Any, agent_type: str = 
         # 连续多个写调用：批准了第一个，第二个又挂起
         return {"reply": "", "trace": result.get("trace") or [], "tool_results": result.get("tool_results") or [],
                 "iters": int(result.get("iters") or 0), "degraded": False, "degrade_reason": "",
-                "usage": {}, "interrupted": True, "confirm": _extract_interrupts(result), "thread_id": thread_id}
+                "usage": {}, "interrupted": True, "confirm": _extract_interrupts(result), "thread_id": thread_id,
+                "usage_total": result.get("usage_total") or {},
+                "budget": _budget_summary(result, str(state.get("agent_type") or agent_type)),
+                "prompt_versions": result.get("prompt_versions") or {}}
     return {"reply": result.get("final", ""), "trace": result.get("trace") or [],
             "tool_results": result.get("tool_results") or [], "iters": int(result.get("iters") or 0),
             "degraded": bool(result.get("degraded")), "degrade_reason": result.get("degrade_reason") or "",
-            "usage": result.get("usage") or {}, "interrupted": False, "thread_id": thread_id}
+            "usage": result.get("usage") or {}, "interrupted": False, "thread_id": thread_id,
+            "usage_total": result.get("usage_total") or {},
+            "budget": _budget_summary(result, str(state.get("agent_type") or agent_type)),
+            "prompt_versions": result.get("prompt_versions") or {}}
 
 
 async def stream_reasoning_events(messages: List[Dict[str, str]], agent_type: str = "general",
@@ -703,6 +848,9 @@ async def stream_reasoning_events(messages: List[Dict[str, str]], agent_type: st
                             "thread_id": thread_id, "interrupted": interrupted}
     if state.get("usage"):
         done["usage"] = state.get("usage")
+    done["usage_total"] = state.get("usage_total") or {}
+    done["budget"] = _budget_summary(state, str(state.get("agent_type") or agent_type))
+    done["prompt_versions"] = state.get("prompt_versions") or {}
     if confirm_payloads:
         done["confirm"] = confirm_payloads
     yield done

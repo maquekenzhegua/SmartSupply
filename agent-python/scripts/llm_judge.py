@@ -129,6 +129,11 @@ def mock_answer(q, ctx):
     if "latency" in q.lower() or "耗时" in q: return "latency"
     return ctx[:120] if ctx else "依据 knowledge 作答 knowledge"
 
+def _opencode_headers():
+    """opencode zen/go 网关要求 x-opencode-session（稳定会话头，缺失 400 MissingSessionID）。"""
+    return {"x-opencode-session": "smartsupply-eval-runner", "User-Agent": "smartsupply-agent-eval/1.0"}
+
+
 def real_answer_fn():
     import importlib.util, sys
     # load app.config without package import issues
@@ -145,7 +150,7 @@ def real_answer_fn():
         # 与 Java AiConfig 完全同路由：只有 muse 走 opencode /responses；其余(含 MiMo v2.5)走标准 chat/completions
         if "opencode" in base and "muse" in (cfg.AI_MODEL or "").lower():
             try:
-                r=httpx.post(f"{base}/responses", headers={"Authorization":f"Bearer {key}","Content-Type":"application/json"}, json={"model":cfg.AI_MODEL,"input":input_text,"max_output_tokens":1200,"reasoning":{"effort":"low"}}, timeout=90)
+                r=httpx.post(f"{base}/responses", headers={"Authorization":f"Bearer {key}","Content-Type":"application/json",**_opencode_headers()}, json={"model":cfg.AI_MODEL,"input":input_text,"max_output_tokens":1200,"reasoning":{"effort":"low"}}, timeout=90)
                 r.raise_for_status(); data=r.json()
                 for node in data.get("output",[]):
                     if node.get("type")=="message" and node.get("role")=="assistant":
@@ -156,17 +161,24 @@ def real_answer_fn():
             except Exception as e:
                 print(f"[answer] /responses 异常（{e}），回退 chat/completions", file=sys.stderr)
         import openai
-        client=openai.OpenAI(api_key=key, base_url=base, timeout=60)
+        client=openai.OpenAI(api_key=key, base_url=base, timeout=60,
+                             default_headers=_opencode_headers() if "opencode" in base else {})
         resp=client.chat.completions.create(model=cfg.AI_MODEL, messages=[{"role":"system","content":system},{"role":"user","content":f"<knowledge>\n{ctx}\n</knowledge>\n\n<user_query>\n{q}\n</user_query>"}], temperature=0.2)
         return resp.choices[0].message.content or ""
     return call
 
-def judge_score(question, answer, contexts):
-    # 用同一真实模型做裁判（0-2 分制），失败则回退关键词命中
+def judge_score(question, answer, contexts, judge_model=None):
+    """真实裁判打 0-2 分。裁判模型可用 EVAL_JUDGE_MODEL 独立配置（缺省=答题模型）。
+
+    失败语义（诚实性修复）：judge 不可用/输出不合法时返回 (None, None, reason)，
+    该样本标记为"裁判缺失"从均值中排除并单独计数——绝不回退关键词代理伪造一个
+    及格分稀释指标（旧实现的 fallback 分会让 judge 故障被均值悄悄吞掉）。
+    """
     try:
         import app.config as cfg
         base=(cfg.OPENAI_BASE_URL or "").rstrip("/"); key=cfg.OPENAI_API_KEY or cfg.DASHSCOPE_API_KEY
         if not key or not base: raise RuntimeError("no key")
+        jm = judge_model or os.getenv("EVAL_JUDGE_MODEL", "") or cfg.AI_MODEL
         prompt=textwrap.dedent(f"""
         你是评测裁判。按 0-2 分制打分：
         faithfulness: 答案是否完全基于上下文，无幻觉 0=严重幻觉 1=部分偏离 2=完全忠实
@@ -177,38 +189,35 @@ def judge_score(question, answer, contexts):
         只输出 JSON: {{"faithfulness": 0-2, "relevance": 0-2, "reason": "..."}}
         """).strip()
         import re, json as js
-        if "opencode" in base and "muse" in (cfg.AI_MODEL or "").lower():  # 同生产路由：仅 muse 走 /responses
+        txt = ""
+        if "opencode" in base and "muse" in (jm or "").lower():  # 与生产路由一致：仅 muse 走 /responses
             try:
-                r=httpx.post(f"{base}/responses", headers={"Authorization":f"Bearer {key}","Content-Type":"application/json"}, json={"model":cfg.AI_MODEL,"input":prompt,"max_output_tokens":600,"reasoning":{"effort":"low"}}, timeout=60)
+                r=httpx.post(f"{base}/responses", headers={"Authorization":f"Bearer {key}","Content-Type":"application/json",**_opencode_headers()}, json={"model":jm,"input":prompt,"max_output_tokens":600,"reasoning":{"effort":"low"}}, timeout=60)
                 if r.status_code==200:
                     data=r.json()
-                    txt=""
                     for node in data.get("output",[]):
                         if node.get("type")=="message":
                             for c in node.get("content",[]):
                                 if c.get("text"): txt=c["text"]
                     if not txt: txt=data.get("output_text","")
-                    m=re.search(r"\{.*\}", txt, re.S)
-                    if m:
-                        j=js.loads(m.group(0))
-                        return int(j.get("faithfulness",1)), int(j.get("relevance",1)), j.get("reason","")
             except Exception:
-                pass
-        import openai
-        client=openai.OpenAI(api_key=key, base_url=base, timeout=60)
-        resp=client.chat.completions.create(model=cfg.AI_MODEL, messages=[{"role":"user","content":prompt}], temperature=0.1)
-        txt=resp.choices[0].message.content or ""
+                txt = ""
+        if not txt:
+            import openai
+            client=openai.OpenAI(api_key=key, base_url=base, timeout=60,
+                                 default_headers=_opencode_headers() if "opencode" in base else {})
+            resp=client.chat.completions.create(model=jm, messages=[{"role":"user","content":prompt}], temperature=0.1)
+            txt=resp.choices[0].message.content or ""
         m=re.search(r"\{.*\}", txt, re.S)
-        if m:
-            j=js.loads(m.group(0))
-            return int(j.get("faithfulness",1)), int(j.get("relevance",1)), j.get("reason","")
+        if not m:
+            raise RuntimeError(f"judge 输出无 JSON: {txt[:80]}")
+        j=js.loads(m.group(0))
+        fh, rel = int(j.get("faithfulness", -1)), int(j.get("relevance", -1))
+        if not (0 <= fh <= 2 and 0 <= rel <= 2):
+            raise RuntimeError(f"judge 分数越界 fh={fh} rel={rel}")
+        return fh, rel, j.get("reason", "")
     except Exception as e:
-        pass
-    # fallback: keyword proxy
-    ctx=" ".join(contexts)
-    faith= 2 if any(tok in ctx for tok in answer.split()[:3] if len(tok)>2) else 1
-    rel= 1
-    return faith, rel, "fallback"
+        return None, None, f"judge-failed: {e}"
 
 def run(mode, limit=None, recall_mode="auto"):
     rows=[json.loads(l) for l in GOLDEN.read_text(encoding="utf-8").splitlines() if l.strip()]
@@ -223,15 +232,24 @@ def run(mode, limit=None, recall_mode="auto"):
         ctx=recall_fn(r["question"])
         ans=ans_fn(r["question"], ctx)
         must_hit=sum(1 for k in r["must_contain"] if k.lower() in ans.lower())/max(1,len(r["must_contain"]))
-        # 证据是否在召回上下文中：区分"检索没给到"与"给了没答对"
+        # 证据是否在召回上下文中：区分"检索没给到"与"给了没答对"（全命中=1，部分命中按比例计）
         evidence_hit=all(k.lower() in ctx.lower() for k in r["must_contain"])
-        fh, rel, reason = (judge_score(r["question"], ans, r["contexts"]) if mode=="real" else (1,1,"mock"))
-        results.append({"q":r["question"],"must_hit":must_hit,"evidence":1 if evidence_hit else 0,"faithfulness":fh,"relevance":rel,"ans":ans[:200],"reason":reason})
-    avg_hit=sum(x["must_hit"] for x in results)/len(results)
-    avg_ev=sum(x["evidence"] for x in results)/len(results)
-    avg_fh=sum(x["faithfulness"] for x in results)/len(results)
-    avg_rel=sum(x["relevance"] for x in results)/len(results)
-    return results, avg_hit, avg_fh, avg_rel, avg_ev
+        evidence_ratio=sum(1 for k in r["must_contain"] if k.lower() in ctx.lower())/max(1,len(r["must_contain"]))
+        fh, rel, reason = (judge_score(r["question"], ans, r["contexts"]) if mode=="real" else (None, None, "mock-no-judge"))
+        results.append({"q":r["question"],"must_hit":must_hit,"evidence":1 if evidence_hit else 0,
+                        "evidence_ratio":evidence_ratio,"faithfulness":fh,"relevance":rel,"ans":ans[:200],"reason":reason})
+    n=len(results)
+    avg_hit=sum(x["must_hit"] for x in results)/n
+    avg_ev=sum(x["evidence"] for x in results)/n
+    avg_ev_ratio=sum(x["evidence_ratio"] for x in results)/n
+    # judge 缺失样本从均值中排除并计数——不得混入 0 分拖低或 1 分稀释
+    judged=[x for x in results if x["faithfulness"] is not None]
+    judge_failures=n-len(judged)
+    avg_fh=sum(x["faithfulness"] for x in judged)/len(judged) if judged else 0.0
+    avg_rel=sum(x["relevance"] for x in judged)/len(judged) if judged else 0.0
+    meta={"judge_model": os.getenv("EVAL_JUDGE_MODEL", "") or os.getenv("AI_MODEL", "mock"),
+          "judge_failures": judge_failures, "judge_valid": len(judged)}
+    return results, avg_hit, avg_fh, avg_rel, avg_ev, avg_ev_ratio, meta
 
 def main():
     ap=argparse.ArgumentParser()
@@ -240,8 +258,20 @@ def main():
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--recall", choices=["auto","vector","bigram"], default=os.getenv("EVAL_RECALL","vector"),
                     help="vector=真实Ollama语义召回（默认）；auto=不可用时回退bigram；bigram=历史口径")
+    ap.add_argument("--judge-model", default=os.getenv("EVAL_JUDGE_MODEL", ""),
+                    help="裁判模型（0-2 分）；缺省=答题模型 AI_MODEL。生产评测建议与答题模型解耦")
+    ap.add_argument("--min-faith", type=float, default=1.2,
+                    help="real 模式 faithfulness(0-2) 门禁阈值，默认 1.2；<=0 不启用")
+    ap.add_argument("--strict-mock", action="store_true",
+                    help="mock 模式也启用关键词命中率门禁（仅校验评测 harness 自身，不代表模型能力）")
+    ap.add_argument("--snapshot-url", default=os.getenv("EVAL_SNAPSHOT_URL", ""),
+                    help="评测快照回传地址（如 http://localhost:8080/api/admin/agent/eval/snapshots），"
+                         "JWT 经 EVAL_SNAPSHOT_JWT 传入；失败仅告警不阻断门禁")
     args=ap.parse_args()
-    results, avg_hit, avg_fh, avg_rel, avg_ev = run(args.mode, args.limit, args.recall)
+    os.environ.setdefault("EVAL_JUDGE_MODEL", args.judge_model or "")
+    if args.judge_model:
+        os.environ["EVAL_JUDGE_MODEL"] = args.judge_model
+    results, avg_hit, avg_fh, avg_rel, avg_ev, avg_ev_ratio, meta = run(args.mode, args.limit, args.recall)
     date=datetime.date.today().isoformat()
     out_path=pathlib.Path(args.out) if args.out else pathlib.Path(f"../docs/eval-report-{args.mode}-{date}.md")
     if not out_path.is_absolute(): out_path=(ROOT / out_path).resolve()
@@ -249,30 +279,78 @@ def main():
     md=[]
     md.append(f"# Eval Report — {args.mode} — {date}")
     md.append("")
-    md.append(f"- 模型: {os.getenv('AI_MODEL','mock')}")
-    md.append(f"- 样本数: {len(results)}")
+    md.append(f"- 模型（答题）: {os.getenv('AI_MODEL','mock')}")
+    md.append(f"- 模型（裁判）: {meta['judge_model'] if args.mode=='real' else '—（mock 模式无裁判）'}"
+              + ("（与答题模型相同，self-judging 偏置需在解读时考虑）" if args.mode=="real" and meta["judge_model"]==os.getenv("AI_MODEL","") else ""))
+    md.append(f"- 样本数: {len(results)}（judge 有效 {meta['judge_valid']} / judge 失败 {meta['judge_failures']}，失败样本已从 faith/relevance 均值排除）")
     md.append(f"- 召回策略: {args.recall}（Embedding: {os.getenv('EMBEDDING_MODEL','qwen3-embedding:0.6b')}）")
     md.append(f"- avg_keyword_hit: {avg_hit:.3f}")
-    md.append(f"- avg_evidence_recall(证据进top-k): {avg_ev:.3f}")
+    md.append(f"- avg_evidence_recall(证据进top-k全命中): {avg_ev:.3f}；按比例: {avg_ev_ratio:.3f}")
     md.append(f"- avg_faithfulness(0-2): {avg_fh:.2f}")
     md.append(f"- avg_relevance(0-2): {avg_rel:.2f}")
+    md.append("")
+    md.append("## 评测口径（诚实性声明）")
+    md.append("")
+    if args.mode == "mock":
+        md.append("- **mock 模式的分数不构成模型能力证据**：答案来自与 golden 集逐题对齐的关键词规则，"
+                  "指标只验证评测 harness 与数据集本身的完整性（harness 自检）。")
+    else:
+        md.append("- golden 集的 contexts 内嵌答案要点（开卷口径），must_contain 为词面匹配；"
+                  "该指标适合回归对比，不能单独作为泛化能力证据。")
+        md.append("- 召回在本脚本内独立构建（VectorRecall/bigram），与生产 Java RagService 链路同构但非同进程，"
+                  "生产端到端质量需以线上 eval_snapshot 与人工抽查补充。")
+        if meta["judge_model"] == os.getenv("AI_MODEL", ""):
+            md.append("- 裁判与答题同模型（self-judging）：分数存在自评偏置，建议 EVAL_JUDGE_MODEL 换用独立模型复评。")
     md.append("")
     md.append("说明：`evidence=0` 表示答案所需关键词没出现在召回上下文中（检索问题）；`evidence=1 且 hit=0` 表示证据已给到但模型没答出（生成/匹配问题）。")
     md.append("")
     md.append("| # | 问题 | must_hit | evid | faith | rel | 答案片段 |")
     md.append("|---|---|---|---|---|---|---|")
     for i,r in enumerate(results,1):
-        md.append(f"| {i} | {r['q'][:40]} | {r['must_hit']:.2f} | {r['evidence']} | {r['faithfulness']} | {r['relevance']} | {r['ans'].replace(chr(10),' ')[:60]} |")
+        fh = "—" if r["faithfulness"] is None else r["faithfulness"]
+        rel = "—" if r["relevance"] is None else r["relevance"]
+        md.append(f"| {i} | {r['q'][:40]} | {r['must_hit']:.2f} | {r['evidence']} | {fh} | {rel} | {r['ans'].replace(chr(10),' ')[:60]} |")
     md.append("")
     # failures
-    fails=[r for r in results if r["must_hit"]<1 or r["faithfulness"]<2]
+    fails=[r for r in results if r["must_hit"]<1 or (r["faithfulness"] is not None and r["faithfulness"]<2)]
     if fails:
         md.append(f"## 失败样本 {len(fails)}")
         for r in fails[:15]:
-            md.append(f"- {r['q']} => hit={r['must_hit']:.2f} evid={r['evidence']} fh={r['faithfulness']} rel={r['relevance']} | {r['ans'][:80]}")
+            fh = r["faithfulness"]
+            md.append(f"- {r['q']} => hit={r['must_hit']:.2f} evid={r['evidence']} fh={'—' if fh is None else fh} rel={r['relevance']} | {r['ans'][:80]}")
     out_path.write_text("\n".join(md), encoding="utf-8")
-    print(f"wrote {out_path} avg_hit={avg_hit:.3f} evid={avg_ev:.3f} fh={avg_fh:.2f} rel={avg_rel:.2f}")
-    # gate
-    if avg_hit < 0.6: print("GATE FAIL: avg_hit < 0.6", file=sys.stderr); sys.exit(2)
+    print(f"wrote {out_path} avg_hit={avg_hit:.3f} evid={avg_ev:.3f} fh={avg_fh:.2f} rel={avg_rel:.2f} judge_fail={meta['judge_failures']}")
+    # 评测快照回传（在线闭环的时序半边）：指标落 eval_snapshot 表，看板出趋势；
+    # 可选能力：未配 URL / 后端不可达仅告警，绝不影响评测与门禁。
+    if args.snapshot_url:
+        try:
+            import httpx
+            token = os.getenv("EVAL_SNAPSHOT_JWT", "")
+            headers = {"Content-Type": "application/json"}
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            payload = {"source": f"llm-judge-{args.mode}", "reportFile": str(out_path),
+                       "metrics": {"n": len(results), "avg_keyword_hit": round(avg_hit, 4),
+                                   "avg_evidence_recall": round(avg_ev, 4), "avg_evidence_ratio": round(avg_ev_ratio, 4),
+                                   "avg_faithfulness": round(avg_fh, 3), "avg_relevance": round(avg_rel, 3),
+                                   "judge_valid": meta["judge_valid"], "judge_failures": meta["judge_failures"]}}
+            r = httpx.post(args.snapshot_url, json=payload, headers=headers, timeout=10)
+            print(f"snapshot -> {args.snapshot_url} status={r.status_code}")
+        except Exception as e:
+            print(f"snapshot post failed (non-fatal): {e}", file=sys.stderr)
+    # gate：真实模式才有模型质量意义；mock 模式门禁仅校验 harness（需 --strict-mock 显式开启）
+    failed = False
+    if args.mode == "real":
+        if avg_hit < 0.6:
+            print("GATE FAIL: avg_hit < 0.6", file=sys.stderr); failed = True
+        if args.min_faith > 0 and meta["judge_valid"] > 0 and avg_fh < args.min_faith:
+            print(f"GATE FAIL: avg_faithfulness {avg_fh:.2f} < {args.min_faith}", file=sys.stderr); failed = True
+        if meta["judge_valid"] == 0:
+            print("GATE FAIL: judge 全部失败，无有效 faith/relevance 信号", file=sys.stderr); failed = True
+    elif args.strict_mock:
+        if avg_hit < 0.6:
+            print("GATE FAIL (harness): avg_hit < 0.6", file=sys.stderr); failed = True
+    if failed:
+        sys.exit(2)
 
 if __name__=="__main__": main()
