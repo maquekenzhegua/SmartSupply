@@ -34,7 +34,7 @@ jobs:
           distribution: temurin
           java-version: '17'
           cache: maven
-      - name: Backend test (full offline suite: H2 + Mock, no key/DB/Redis needed)
+      - name: "Backend test (full offline suite: H2 + Mock, no key/DB/Redis needed)"
         working-directory: backend
         run: mvn -B test
       # 真 PG 回归（Testcontainers，pgvector 镜像 + 真实 Flyway 迁移）：ubuntu runner 自带 Docker，
@@ -211,14 +211,15 @@ jobs:
   real-eval:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_real_eval }}    steps:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_real_eval }}
+    steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: pip
           cache-dependency-path: agent-python/requirements.txt
-      - name: Real LLM eval (requires secrets: OPENAI_API_KEY / OPENAI_BASE_URL / AI_MODEL)
+      - name: "Real LLM eval (requires secrets: OPENAI_API_KEY / OPENAI_BASE_URL / AI_MODEL)"
         working-directory: agent-python
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
