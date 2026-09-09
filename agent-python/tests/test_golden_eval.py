@@ -220,6 +220,7 @@ def _real_answer_fn():
     走 httpx 直连；其余 OpenAI 兼容端点走 chat.completions。"""
     import httpx
     from app import config
+    from app.llm import _opencode_headers
 
     base = (config.OPENAI_BASE_URL or "").rstrip("/")
     api_key = config.OPENAI_API_KEY or config.DASHSCOPE_API_KEY
@@ -239,7 +240,9 @@ def _real_answer_fn():
         }
         r = httpx.post(
             f"{base}/responses",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
+                     # opencode 网关强制会话头（缺失 400 MissingSessionID，CI 首跑实锤）
+                     **_opencode_headers()},
             json=payload,
             timeout=120,
         )
@@ -257,7 +260,8 @@ def _real_answer_fn():
     def _chat_answer(question: str, context: str) -> str:
         import openai
 
-        client = openai.OpenAI(api_key=api_key, base_url=base, timeout=120)
+        client = openai.OpenAI(api_key=api_key, base_url=base, timeout=120,
+                               default_headers=_opencode_headers())
         resp = client.chat.completions.create(
             model=config.AI_MODEL,
             messages=[
