@@ -6,6 +6,7 @@ dist/
 .env
 .env.local
 logs/
+run/
 .pytest_cache/
 __pycache__/
 *.bak
@@ -33,6 +34,9 @@ agent-python/docs/
 # Frontend
 frontend/dist/
 frontend/node_modules/
+frontend/playwright-report/
+frontend/test-results/
+coverage/
 
 # Backend
 backend/target/

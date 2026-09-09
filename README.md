@@ -39,20 +39,32 @@ Vue 3 前端  ── REST / SSE ──►  Spring Boot 3.5 编排层
 
 ## 快速开始
 
+一键启停（推荐，脚本内置健康门禁：Docker 冷启动等待、Postgres 就绪、Ollama 模型预热、
+各组件端口/HTTP 探活，任一步失败自动打印对应日志尾部并中止）：
+
+```bat
+:: Windows：双击或命令行运行（首次会自动拉起 Docker Desktop 并等待引擎就绪）
+start-all.cmd      rem 启动全栈：docker(postgres/redis/langfuse) + ollama + 边车 + 后端 + 前端
+status-all.cmd     rem 查看各组件健康状态与端口
+stop-all.cmd       rem 全部停止（容器移除、数据卷保留，下次启动数据还在）
+```
+
+等效的手工步骤（Linux/macOS 或需要分步排查时）：
+
 ```bash
-# 1. 启动基础设施
-docker compose up -d
+# 1. 启动基础设施（langfuse 为可选 profile）
+docker compose --profile obs up -d
 
-# 2. 启动后端
-cd backend && mvn spring-boot:run
+# 2. 启动深度推理边车（Windows 必须用 run_sidecar.py 启动器：
+#    psycopg 异步池不兼容 Windows 默认 Proactor 事件循环，直接 uvicorn 会静默降级 MemorySaver）
+cd agent-python && python run_sidecar.py      # http://localhost:8001/health
 
-# 3. 启动前端
+# 3. 启动后端（数据源凭据需与 docker-compose 的 postgres 一致）
+cd backend && SPRING_DATASOURCE_USERNAME=dev SPRING_DATASOURCE_PASSWORD=change-me-strong-password mvn spring-boot:run
+
+# 4. 启动前端（3000 被 langfuse 占用，dev 端口固定为 3001，/api 已代理到 8080）
 cd frontend && npm install && npm run dev
-# 前端 http://localhost:3000  后端 http://localhost:8080/doc.html
-
-# 可选：深度推理边车
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8001 --reload
-# 前端开启"深度推理"开关需同时设置 AGENT_PYTHON_ENABLED=true
+# 前端 http://localhost:3001  后端 http://localhost:8080
 ```
 
 演示账号 admin / admin123（ADMIN）与 ops / ops123（只读角色，可演示写操作被 RBAC 拒绝）仅用于本地演示；生产环境请通过 DEMO_ADMIN_PASSWORD / DEMO_OPS_PASSWORD 环境变量覆盖。
