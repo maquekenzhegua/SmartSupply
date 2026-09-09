@@ -50,6 +50,8 @@ public class JwtService {
         return Jwts.builder()
                 .subject(username)
                 .claim("role", role)
+                // jti：注销/改密可按 token 指纹吊销（Redis 黑名单，见 AuthController.logout）
+                .id(java.util.UUID.randomUUID().toString())
                 .issuedAt(new Date(now))
                 .expiration(new Date(now + expireMs))
                 .signWith(key)

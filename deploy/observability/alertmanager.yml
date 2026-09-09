@@ -1,0 +1,15 @@
+# Alertmanager 起步配置：默认 receiver 打到本地日志（可观测自证），生产请替换为
+# webhook/钉钉/飞书/Slack 等真实接收端（group_by + repeat_interval 控制噪声）。
+route:
+  receiver: default
+  group_by: ["alertname", "severity"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+receivers:
+  - name: default
+    # TODO(部署侧): 替换为真实通知渠道，例如：
+    # webhook_configs:
+    #   - url: http://your-webhook/alerts
+    #     send_resolved: true

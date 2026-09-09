@@ -21,11 +21,14 @@ public class AuthController {
     private final JwtService jwtService;
     private final PasswordEncoder encoder;
     private final JdbcTemplate jdbc;
+    private final org.springframework.data.redis.core.StringRedisTemplate redis;
 
-    public AuthController(JwtService jwtService, PasswordEncoder encoder, JdbcTemplate jdbc) {
+    public AuthController(JwtService jwtService, PasswordEncoder encoder, JdbcTemplate jdbc,
+                          org.springframework.data.redis.core.StringRedisTemplate redis) {
         this.jwtService = jwtService;
         this.encoder = encoder;
         this.jdbc = jdbc;
+        this.redis = redis;
     }
 
     // 登录爆破防线：此前 /api/auth/** permitAll 且无限流，可无限尝试密码；
@@ -55,6 +58,31 @@ public class AuthController {
         String role = String.valueOf(row.getOrDefault("role", "USER"));
         String token = jwtService.generate(username, role);
         return Result.ok(Map.of("token", token, "username", username, "role", role));
+    }
+
+    /**
+     * 注销：把当前 token 的 jti 写入 Redis 黑名单（TTL=剩余有效期，到期自动出列），
+     * JwtAuthFilter 每次请求校验——12h 短周期 + 可撤销，不引入 refresh token 控制改动面。
+     * Redis 不可用时如实降级：注销仍返回成功，但吊销只到 token 自然过期为止（fail-open，
+     * 与限流器同一可用性优先口径）。
+     */
+    @PostMapping("/logout")
+    public Result<Void> logout(@RequestHeader(value = "Authorization", required = false) String auth) {
+        if (auth != null && auth.startsWith("Bearer ")) {
+            try {
+                Claims claims = jwtService.parse(auth.substring(7));
+                String jti = claims.getId();
+                long ttlMs = claims.getExpiration().getTime() - System.currentTimeMillis();
+                if (jti != null && ttlMs > 0) {
+                    redis.opsForValue().set("jwt:revoke:" + jti, "1",
+                            java.time.Duration.ofMillis(ttlMs));
+                }
+            } catch (Exception e) {
+                // token 本身已无效（过期/伪造）：无需吊销，按成功返回避免信息泄漏
+                log.debug("logout token parse failed: {}", e.toString());
+            }
+        }
+        return Result.ok();
     }
 
     @GetMapping("/me")

@@ -53,6 +53,8 @@ stop-all.cmd       rem 全部停止（容器移除、数据卷保留，下次启
 
 ```bash
 # 1. 启动基础设施（langfuse 为可选 profile）
+# 生产为组合编排（obs 服务密钥可强制必填）：见下
+# 本地开发：
 docker compose --profile obs up -d
 
 # 2. 启动深度推理边车（Windows 必须用 run_sidecar.py 启动器：
@@ -84,7 +86,8 @@ docker run --rm -i -e BASE_URL=http://host.docker.internal:8080 grafana/k6 run -
 | 离线演示（默认） | 无需 Key，开箱即用 |
 | 真实模型 | 设置 OPENAI_API_KEY、OPENAI_BASE_URL、AI_MODEL 自动切换 OpenAI / DeepSeek / 通义千问等兼容接口 |
 | 向量模型 | 默认对接本地 Ollama，也可指向 OpenAI Embedding |
-| Langfuse 观测（可选） | `docker compose --profile obs up -d langfuse`（无头初始化自动建项目与 key），`python agent-python/scripts/gen_langfuse_traces.py` 一键生成演示 trace；不配置则完全禁用、零开销 |
+| 观测（可选） | 本地开发 `docker compose --profile obs up -d`；生产 `docker compose -f docker-compose.prod.yml -f docker-compose.obs.yml up -d`（Prometheus/Grafana/Alertmanager，指标已由 Micrometer 暴露，告警规则在 deploy/observability/）。Langfuse trace：`python agent-python/scripts/gen_langfuse_traces.py` 一键生成演示 trace；不配置则完全禁用、零开销 |
+| TLS | 默认 80；需要 HTTPS 时叠加 `docker-compose.prod.tls.yml`（证书放 deploy/certs/），三种接入方式见 docs/tls.md |
 | checkpointer 持久化（可选） | 边车配 `CHECKPOINT_URI`（Postgres）后 interrupt 挂起状态落库，重启/多实例仍可恢复待审批写操作；缺省进程内 MemorySaver |
 
 生产部署参考 docker-compose.prod.yml，通过 .env 注入凭据，详见 .env.example。

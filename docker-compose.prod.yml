@@ -1,9 +1,24 @@
-# 生产编排：只有 nginx 对外暴露 80；PG/Redis/边车均在内部网络，不发布端口。
-# 密钥不设默认值（:? 语法缺省即启动失败），从 .env 注入（参见 .env.example）。
+# 生产编排：只有 nginx 对外暴露 80（TLS 见 docker-compose.prod.tls.yml 覆盖文件）；
+# PG/Redis/边车均不发布端口。密钥不设默认值（:? 语法缺省即启动失败），从 .env 注入。
+# 可观测平台（Langfuse/Prometheus/Grafana/Alertmanager）拆在 docker-compose.obs.yml，
+# 按需叠加：docker compose -f docker-compose.prod.yml -f docker-compose.obs.yml up -d
+# （拆分的根本原因：obs 服务的必填密钥可用 :? 强制，而 profile 方式无法做到——
+#   compose config 会为所有 profile 求值，:? 会误伤不启用 obs 的部署）。
+
+# 固定项目名：镜像名确定性（smartsupply-backend 等），CI 发布按此打 GHCR 标签
+name: smartsupply
+
+# 统一日志轮转：json-file 默认无界增长会吃满宿主机磁盘（此前全部服务未配置）
+x-logging: &default-logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+
 services:
   postgres:
     image: pgvector/pgvector:pg16
     restart: unless-stopped
+    logging: *default-logging
+    mem_limit: 1g
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-smartsupply}
       POSTGRES_USER: ${POSTGRES_USER:-dev}
@@ -22,6 +37,8 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    logging: *default-logging
+    mem_limit: 256m
     command: redis-server --appendonly yes
     volumes: [redisdata:/data]
     healthcheck: { test: ["CMD","redis-cli","ping"], interval: 10s, retries: 5 }
@@ -29,6 +46,9 @@ services:
   backend:
     build: ./backend
     restart: unless-stopped
+    logging: *default-logging
+    mem_limit: 1g
+    cpus: 2
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -41,7 +61,9 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com}
       AI_MODEL: ${AI_MODEL:-gpt-4o-mini}
-      AI_MOCK: ${AI_MOCK:-true}
+      # fail-closed：必须显式选择——离线演示 true / 接真实模型 false。此前默认 true，
+      # 漏配时生产会静默用 Mock 模型答话而不自知
+      AI_MOCK: ${AI_MOCK:?AI_MOCK must be set explicitly (true=offline mock demo, false=real model with OPENAI_API_KEY)}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET (>=32 chars) is required}
       DEMO_ADMIN_PASSWORD: ${DEMO_ADMIN_PASSWORD:-}
       DEMO_OPS_PASSWORD: ${DEMO_OPS_PASSWORD:-}
@@ -56,6 +78,9 @@ services:
   agent-python:
     build: ./agent-python
     restart: unless-stopped
+    logging: *default-logging
+    mem_limit: 1536m
+    cpus: 2
     environment:
       JAVA_API_BASE: http://backend:8080
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -64,7 +89,7 @@ services:
       SIDECAR_USERNAME: ${SIDECAR_USERNAME:-}
       SIDECAR_PASSWORD: ${SIDECAR_PASSWORD:-}
       SIDECAR_API_KEY: ${SIDECAR_API_KEY:-}
-      # 可观测性（可选）：配置 LANGFUSE_* 后 trace 上报到 langfuse 服务
+      # 可观测性（可选）：配置 LANGFUSE_* 后 trace 上报到 langfuse 服务（见 docker-compose.obs.yml）
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
       LANGFUSE_HOST: ${LANGFUSE_HOST:-http://langfuse:3000}
@@ -75,26 +100,11 @@ services:
       backend: { condition: service_healthy }
       postgres: { condition: service_healthy }
 
-  # 可选观测平台（profile "obs"：docker compose --profile obs up -d langfuse）。
-  # 内部网络不发布端口：演示时经 ssh -L 3000:localhost:3000 隧道访问，或在 nginx 加受保护路由。
-  # 注意：启用 obs 前必须设置 LANGFUSE_NEXTAUTH_SECRET/LANGFUSE_SALT（compose 无法按 profile 强制必填，
-  # 下方默认值仅为语法占位，切勿以默认值上线）。
-  langfuse:
-    image: langfuse/langfuse:2
-    restart: unless-stopped
-    profiles: ["obs"]
-    environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-dev}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/langfuse
-      NEXTAUTH_URL: ${LANGFUSE_PUBLIC_URL:-http://localhost:3000}
-      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-UNSAFE-DEFAULT-only-validates-compose-syntax}
-      SALT: ${LANGFUSE_SALT:-UNSAFE-DEFAULT-only-validates-compose-syntax}
-      TELEMETRY_ENABLED: "false"
-    depends_on:
-      postgres: { condition: service_healthy }
-
   frontend:
     build: ./frontend
     restart: unless-stopped
+    logging: *default-logging
+    mem_limit: 128m
     ports: ["80:80"]
     depends_on:
       backend: { condition: service_healthy }

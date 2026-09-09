@@ -51,7 +51,11 @@ public class RateLimitInterceptor implements HandlerInterceptor {
         RateLimit ann = hm.getMethodAnnotation(RateLimit.class);
         if (ann == null) ann = hm.getBeanType().getAnnotation(RateLimit.class);
         if (ann == null) return true;
-        String key = "rl:" + (ann.key().isBlank() ? hm.getMethod().getName() : ann.key()) + ":" + clientIp(request);
+        // key 维度 = 接口 + 客户端 IP + 登录用户：仅 IP 会让 NAT 后多用户共享配额互相锁死、
+        // 单用户换 IP 绕过配额；匿名请求退化为仅 IP 维度
+        String username = com.smartsupply.common.CurrentUser.username();
+        String key = "rl:" + (ann.key().isBlank() ? hm.getMethod().getName() : ann.key()) + ":" + clientIp(request)
+                + (username == null || username.isBlank() ? "" : ":" + username);
         try {
             Long count = redis.execute(INCR_WITH_TTL, List.of(key), String.valueOf(Duration.ofMinutes(1).toMillis()));
             if (count != null && count > ann.permitsPerMinute()) {

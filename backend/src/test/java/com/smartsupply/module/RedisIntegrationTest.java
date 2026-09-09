@@ -22,7 +22,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
  * 真 Redis 集成回归（Testcontainers）：限流与幂等此前只测过"Redis 不可用降级"分支，
@@ -99,8 +101,7 @@ class RedisIntegrationTest {
     }
 
     @Test
-    void concurrentDuplicateCreateIsExactlyOneSuccess() throws Exception {
-        // 幂等键并发互斥：两个线程同 payload 同时创建采购单，恰好一个 success=true，
+    void concurrentDuplicateCreateIsExactlyOneSuccess() throws Exception {        // 幂等键并发互斥：两个线程同 payload 同时创建采购单，恰好一个 success=true，
         // 另一个 duplicate=true（tryAcquire 在真 Redis 上必须不可重入）
         String payload = om.writeValueAsString(Map.of(
                 "supplierId", 1, "skuCode", "SKU-T001-WH-M", "quantity", 7, "unitPrice", 9.9));
@@ -126,5 +127,18 @@ class RedisIntegrationTest {
         } finally {
             pool.shutdownNow();
         }
+    }
+
+    @Test
+    void logoutRevokesTokenImmediately() throws Exception {
+        // JWT jti 吊销闭环：登录 → token 可用 → 注销（jti 进 Redis 黑名单）→ 同一 token 立即 401。
+        // 此前 JWT 无刷新/无吊销，注销后 token 在 12h 内仍完全有效。
+        mvc.perform(get("/api/suppliers").header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk());
+        mvc.perform(post("/api/auth/logout").header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk());
+        assertThat(redis.keys("jwt:revoke:*")).as("吊销键必须落在 Redis").isNotEmpty();
+        mvc.perform(get("/api/suppliers").header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isUnauthorized());
     }
 }

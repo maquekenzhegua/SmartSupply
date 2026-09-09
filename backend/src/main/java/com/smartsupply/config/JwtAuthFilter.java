@@ -18,8 +18,12 @@ import java.util.List;
 public class JwtAuthFilter extends OncePerRequestFilter {
 
     private final JwtService jwtService;
+    private final org.springframework.data.redis.core.StringRedisTemplate redis;
 
-    public JwtAuthFilter(JwtService jwtService) { this.jwtService = jwtService; }
+    public JwtAuthFilter(JwtService jwtService, org.springframework.data.redis.core.StringRedisTemplate redis) {
+        this.jwtService = jwtService;
+        this.redis = redis;
+    }
 
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
@@ -29,6 +33,22 @@ public class JwtAuthFilter extends OncePerRequestFilter {
             String token = header.substring(7);
             try {
                 var claims = jwtService.parse(token);
+                // 吊销检查（jti 黑名单）：注销/改密后 token 立即失效。Redis 不可用时 fail-open
+                // （可用性优先，与限流器同口径），此时吊销退化为"等 token 自然过期"
+                String jti = claims.getId();
+                if (jti != null && jti.isBlank()) jti = null;
+                if (jti != null) {
+                    try {
+                        if (Boolean.TRUE.equals(redis.hasKey("jwt:revoke:" + jti))) {
+                            response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+                            response.setContentType("application/json;charset=UTF-8");
+                            response.getWriter().write("{\"code\":401,\"msg\":\"登录状态已注销，请重新登录\",\"data\":null}");
+                            return;
+                        }
+                    } catch (Exception redisDown) {
+                        // fail-open：继续按有效 token 处理
+                    }
+                }
                 String username = claims.getSubject();
                 String role = claims.get("role", String.class);
                 var auth = new UsernamePasswordAuthenticationToken(

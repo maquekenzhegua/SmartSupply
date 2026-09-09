@@ -53,11 +53,17 @@ public class AgentController {
     private final boolean chatMock;
     private final String aiModelName;
     private final boolean embeddingMock;
-    private final ExecutorService sseExecutor = Executors.newCachedThreadPool(r -> {
-        Thread t = new Thread(r, "agent-sse");
-        t.setDaemon(true);
-        return t;
-    });
+    // 有界 SSE 线程池：无界 cachedThreadPool 每条流占一线程，恶意/异常并发下无线程上限。
+    // 上限 32 + 有界队列，打满时由调用线程兜底泵事件（退化为同步，仍可服务而非拒绝）
+    private final ExecutorService sseExecutor = new java.util.concurrent.ThreadPoolExecutor(
+            8, 32, 60, java.util.concurrent.TimeUnit.SECONDS,
+            new java.util.concurrent.LinkedBlockingQueue<>(64),
+            r -> {
+                Thread t = new Thread(r, "agent-sse");
+                t.setDaemon(true);
+                return t;
+            },
+            new java.util.concurrent.ThreadPoolExecutor.CallerRunsPolicy());
 
     public AgentController(ChatClient chatClient, RagService ragService, ChatMemoryService memory,
                            com.smartsupply.agent.tools.InventoryTools inventoryTools,

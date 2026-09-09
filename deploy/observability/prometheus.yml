@@ -1,0 +1,20 @@
+# Prometheus 抓取与告警评估配置（挂载进 docker-compose.obs.yml 的 prometheus 服务）
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  # Spring Boot Micrometer：prod 拓扑中 8080 仅内部网络可达（nginx 只代理 80 的 /api 与 /），
+  # /actuator/prometheus 已在 SecurityConfig 中仅对内放开；如需更严可改独立 management 端口
+  - job_name: backend
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["backend:8080"]

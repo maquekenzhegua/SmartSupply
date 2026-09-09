@@ -28,6 +28,7 @@ public class PythonSidecarService {
     private final String baseUrl;
     private final boolean enabled;
     private final String apiKey;
+    private final long blockingTimeoutMs;
     private final AtomicInteger failures = new AtomicInteger(0);
     private final AtomicLong openUntil = new AtomicLong(0);
     private static final int CIRCUIT_THRESHOLD = 5;
@@ -70,6 +71,7 @@ public class PythonSidecarService {
         this.enabled = enabled;
         this.baseUrl = baseUrl;
         this.apiKey = apiKey;
+        this.blockingTimeoutMs = blockingTimeoutMs;
         SimpleClientHttpRequestFactory f = new SimpleClientHttpRequestFactory();
         f.setConnectTimeout(5_000);            // 连接快速失败，交给重试/熔断
         // 非流式 /api/reason 在真实推理模型下单次可到 1~4 分钟（curl 实测 46s，慢时更久）；
@@ -127,6 +129,7 @@ public class PythonSidecarService {
         int maxAttempts = 3;
         long backoffMs = 400;
         Exception last = null;
+        long startedAt = System.currentTimeMillis();
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
             try {
                 Map<String, Object> resp = restClient.post()
@@ -162,12 +165,12 @@ public class PythonSidecarService {
                     return degradedError("sidecar_degraded_body", e.getResponseBodyAsString());
                 }
                 last = e;
-                if (!isRetryable(e) || attempt == maxAttempts) break;
+                if (!isRetryable(e) || attempt == maxAttempts || overRetryBudget(startedAt)) break;
                 sleepBackoff(backoffMs);
                 backoffMs = Math.min(backoffMs * 2, 4000);
             } catch (Exception e) {
                 last = e;
-                if (!isRetryable(e) || attempt == maxAttempts) break;
+                if (!isRetryable(e) || attempt == maxAttempts || overRetryBudget(startedAt)) break;
                 sleepBackoff(backoffMs);
                 backoffMs = Math.min(backoffMs * 2, 4000);
             }
@@ -180,6 +183,16 @@ public class PythonSidecarService {
             log.warn("sidecar all attempts failed (failures={}), degrade to Java direct: {}", f, last == null ? "unknown" : last.toString());
         }
         return null;
+    }
+
+    /**
+     * 重试总时长预算：单次阻塞调用读超时最长 blocking-timeout-ms（默认 300s），满额重试
+     * 3 次最坏占住请求线程 15 分钟，且 Java 侧 300s 已先掐断——"边车仍在跑、调用方已判死"
+     * 的悬挂执行只会白烧 token。已耗过半预算（说明本次失败是长调用超时/5xx）即不再重试；
+     * 连接类快速失败（毫秒级）仍可重试满 3 次。
+     */
+    private boolean overRetryBudget(long startedAt) {
+        return System.currentTimeMillis() - startedAt > blockingTimeoutMs / 2;
     }
 
     private static List<Map<String, Object>> listOfMaps(Map<String, Object> resp, String key) {

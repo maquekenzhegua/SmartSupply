@@ -7,6 +7,13 @@ spring:
     username: ${SPRING_DATASOURCE_USERNAME:smartsupply}
     password: ${SPRING_DATASOURCE_PASSWORD:smartsupply123}
     driver-class-name: org.postgresql.Driver
+    # 连接池此前零配置（默认 10 连接）：系统内存在 5 分钟级阻塞调用（边车/LLM），
+    # 高并发下连接先于业务成为瓶颈；10s 取连接超时让等待方快速失败而非堆积
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+      connection-timeout: 10000
+      max-lifetime: 1800000
   flyway:
     enabled: true
     locations: classpath:db/migration

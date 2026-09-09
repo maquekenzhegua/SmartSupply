@@ -38,9 +38,12 @@ public class SecurityConfig {
             .csrf(AbstractHttpConfigurer::disable)
             .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> auth
-                // 健康探针公开；指标与 Prometheus 端点仅 ADMIN（否则成本/token 台账可被匿名抓取）
+                // 健康探针公开；指标与 Prometheus 端点仅 ADMIN（否则成本/token 台账可被匿名抓取）。
+                // 例外：/actuator/prometheus 对内放开——prod 拓扑 8080 不对外发布（仅 nginx 80
+                // 代理 /api 与 /），Prometheus 从内部网络抓取；JWT 会过期无法用于常驻抓取凭据。
                 .requestMatchers("/api/auth/**", "/swagger-ui/**", "/v3/api-docs/**",
                         "/doc.html", "/actuator/health", "/actuator/health/**", "/actuator/info").permitAll()
+                .requestMatchers("/actuator/prometheus").permitAll()
                 .requestMatchers("/actuator/**").hasRole("ADMIN")
                 .anyRequest().authenticated()
             )

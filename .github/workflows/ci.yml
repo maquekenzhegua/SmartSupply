@@ -11,6 +11,10 @@ on:
         description: '使用仓库 Secrets 中的真实 LLM Key 跑评测'
         type: boolean
         default: false
+      run_perf:
+        description: '起本地栈跑 k6 负载冒烟（读+写场景，P95 阈值门禁）'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -128,15 +132,46 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: [backend, frontend, agent-python]
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
       # 多阶段 Dockerfile 直接从源码构建（无需预编译产物）
       - run: docker compose -f docker-compose.prod.yml build
-      - name: Validate compose config (with required secrets stubbed)
+      - name: Validate prod compose config (with required secrets stubbed)
         env:
           POSTGRES_PASSWORD: ci-stub-password
           JWT_SECRET: ci-stub-jwt-secret-0123456789abcdef0123456789abcdef
+          AI_MOCK: 'true'
         run: docker compose -f docker-compose.prod.yml config --quiet
+      - name: Validate obs compose config (secrets stubbed)
+        env:
+          POSTGRES_PASSWORD: ci-stub-password
+          LANGFUSE_NEXTAUTH_SECRET: ci-stub-langfuse-nextauth-secret
+          LANGFUSE_SALT: ci-stub-langfuse-salt
+          GRAFANA_ADMIN_PASSWORD: ci-stub-grafana
+        run: docker compose -f docker-compose.prod.yml -f docker-compose.obs.yml config --quiet
+      - name: Validate TLS overlay compose config
+        run: docker compose -f docker-compose.prod.yml -f docker-compose.prod.tls.yml config --quiet
+      # 镜像发布：此前只 build 不 push，部署只能目标机自行构建（"最后一公里"缺口）
+      # tag = sha（可回滚定位）+ latest（滚动）；GHCR 登录用内置 GITHUB_TOKEN
+      - name: Push images to GHCR (main branch only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_LC: ${{ github.repository }}
+        run: |
+          echo "$GITHUB_TOKEN" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          REPO="${REPO_LC,,}"
+          for svc in backend frontend agent-python; do
+            img="ghcr.io/${REPO}/${svc}"
+            docker tag "smartsupply-${svc}" "$img:${{ github.sha }}"
+            docker tag "smartsupply-${svc}" "$img:latest"
+            docker push "$img:${{ github.sha }}"
+            docker push "$img:latest"
+            echo "pushed $img"
+          done
 
   eval:
     runs-on: ubuntu-latest
@@ -176,8 +211,7 @@ jobs:
   real-eval:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_real_eval }}
-    steps:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_real_eval }}    steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
@@ -209,3 +243,31 @@ jobs:
             agent-python/docs/eval-report-real-ci.md
             agent-python/docs/eval-trajectory-real-ci.md
           retention-days: 30
+
+  perf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_perf }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - name: Infra (postgres + redis)
+        run: docker compose up -d postgres redis
+      - name: Backend (AI_MOCK, 限流关闭压数据库而非限流器)
+        working-directory: backend
+        env:
+          SPRING_DATASOURCE_USERNAME: dev
+          SPRING_DATASOURCE_PASSWORD: change-me-strong-password
+          SMARTSUPPLY_RATELIMIT_ENABLED: 'false'
+        run: |
+          mvn -B -q package -DskipTests
+          nohup java -jar target/*.jar --server.port=8080 > backend-perf.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf -o /dev/null http://localhost:8080/api/auth/login -X POST -H 'Content-Type: application/json' -d '{"username":"x","password":"x"}' && break || sleep 2; done
+      - name: k6 读链路（P95 阈值门禁）
+        run: docker run --rm -i -e BASE_URL=http://host.docker.internal:8080 --add-host=host.docker.internal:host-gateway grafana/k6 run - < deploy/loadtest/k6-smoke.js
+      - name: k6 写链路（P95 阈值门禁）
+        run: docker run --rm -i -e BASE_URL=http://host.docker.internal:8080 -e SCENARIO=writes --add-host=host.docker.internal:host-gateway grafana/k6 run - < deploy/loadtest/k6-smoke.js
