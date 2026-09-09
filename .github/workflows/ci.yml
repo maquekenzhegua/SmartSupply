@@ -89,6 +89,9 @@ jobs:
       - name: Frontend deps + Playwright
         working-directory: frontend
         run: |
+          # runner 预置的 google-chrome apt 源曾因上游索引瞬时哈希不匹配，连带 playwright --with-deps
+          # 的 apt 更新整体失败（首次真实 CI 实锤）；先移除该源再装依赖
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list
           npm ci
           npx playwright install --with-deps chromium
       - name: E2E main flow
@@ -149,8 +152,13 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
-      # 多阶段 Dockerfile 直接从源码构建（无需预编译产物）
+      # 多阶段 Dockerfile 直接从源码构建（无需预编译产物）；prod compose 的 :? 必填变量
+      # 在 build 时同样会被求值，必须与下方 config 校验步骤一致地给 stub
       - run: docker compose -f docker-compose.prod.yml build
+        env:
+          POSTGRES_PASSWORD: ci-stub-password
+          JWT_SECRET: ci-stub-jwt-secret-0123456789abcdef0123456789abcdef
+          AI_MOCK: 'true'
       - name: Validate prod compose config (with required secrets stubbed)
         env:
           POSTGRES_PASSWORD: ci-stub-password
