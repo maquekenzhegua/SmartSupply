@@ -2,6 +2,52 @@
 
 > 本文按能力+时间线记录演进契约；开发问题的完整复盘（现象→排查→根因→修复→教训）独立整理在 [lessons-learned.md](lessons-learned.md)。
 
+## 平台化补强（2026-09-09）：对照大厂 Agent 平台差距矩阵的五项补齐
+
+背景：差距矩阵自查发现五处"看起来有、实际不闭环/不管控"的缺口，本轮全部落地并有测试钉死。
+
+### Prompt 管理中心：从"只写不读的摆设"到真闭环
+- **此前硬伤**：对话链路读内存 PromptRegistry（4 条硬编码），Admin"激活/回滚"写 prompt_version 表但**运行时从不读表**——激活是摆设；深度模式 planner/reflector 提示词另一套硬编码，agent_type 人设与图脱节
+- **现在**：`PromptRegistry` 运行时读 `prompt_version` 表 active 版（惰性缓存 + 发布/激活后 evict），DB 无覆盖或不可达（熔断 30s）回退内置默认并标注来源；Admin 新增 `/prompts/effective`（每个 agent_type 生效版本 + source=db/builtin），闭环可验证
+- **归因**：`agent_run.prompt_version`（V5 迁移）落本次对话实际生效的版本号，`/chat` 响应带 `promptVersion`——评测报告可按 prompt 版本归因（此前改 prompt 无法知道是哪版在跑）
+- **深度模式 persona 透传**：Java 解析后的 persona 以 messages[0] 进图，边车 `_persona_system` 提取为规划/反思前缀（`persona_source=java-registry`），DB 发布的提示词在深度模式真实生效；直调边车/MCP 无 system 消息时用 `app/prompts.py` 内置兜底（版本化：planner v4.0 / reflector v3.1 / persona 对齐 Java 内置版），版本组合随 trace、`/api/reason` 响应、done 事件上报
+- **测试**：`PromptRegistryTest`（8 例：DB 优先/兜底/降级/evict/publish/deep 归一）+ `AdminAgentPlatformTest.promptPublishEffectiveAndChatActuallyUsesIt`（发布 → effective 显示 db → /chat 响应 promptVersion=发布版 → 台账落库，端到端闭环）
+
+### 成本管控：从"只记账"到三层闸门
+- **此前**：只有成本观测（TokenEstimator 固定单价 → agent_run.cost_usd → Costs 页聚合），无任何管控
+- **模型价格表**（`ModelPricingTable`）：`smartsupply.ai.pricing.models.<模型>.prompt-per-1k/completion-per-1k` 按模型查价（精确→最长前缀→回退全局单价），多模型路由下成本口径才真实；未配价的模型大声告警一次
+- **快慢模型路由**：planner/reflector 走 `AI_MODEL_FAST`（未配置=主模型，零配置不变），reasoner 走主模型；边车 `usage_total.by_model` 按模型累计（混合估算来源的槽位整体如实标 estimated），Java 按模型逐桶计价汇总（`DeepUsage`），不再单模型一口价
+- **单次运行预算**（边车图内）：`RUN_TOKEN_BUDGET` + `AGENT_TOKEN_BUDGETS`（按 agent_type 覆盖）；planner 每轮检查累计 token，超限不再调 LLM、提前收敛作答，trace/done/响应带 `budget={limit,used,exhausted}`——策略性收口不算 degraded，但如实标注
+- **用户级日预算**（Java 闸门）：`AgentBudgetService`（Redis 日计数 + TTL，Redis 不可用回退 DB 台账 SUM，口径故障按 0 宁可漏拦不可误拦）；`AGENT_DAILY_COST_LIMIT_USD`（默认 0=关闭）超限 /chat 与 /chat/stream 直接 429 拒绝，先于任何 LLM/工具开销；运行完成 `addCost` 累加
+- **测试**：`AgentBudgetServiceTest`（7 例）+ `AgentBudgetGateTest`（超限 429 / 未超限放行，Redis 不可用走 DB 口径）+ Python `test_budget_gate_stops_collecting` 等
+
+### 评测：在线闭环 + 分层指标补齐
+- **数据集分层**：golden_rag.jsonl 60 条补 `layer` 字段（rag 20 / tool 10 / hitl 10 / injection 10 / extended 10，与历史口径一致），`test_golden_eval` 按层输出 avg_keyword_hit/avg_context_recall——总量达标掩盖单层塌方从此可见
+- **在线反馈闭环**：负反馈（rating≤0）经 `/api/admin/agent/eval/candidates` 带出提问原文、被评消息、运行上下文（agent_type/mode/model/prompt_version）；`/eval/candidates/export` 导出 golden JSONL，**ground_truth 留空**——人工标注后并入 golden 集即完成"在线→离线"回流（机器绝不代填正确答案）。此前 user_feedback 只有 GROUP BY 计数，"驱动评测候选"只存在于文档
+- **评测快照趋势**：`eval_snapshot` 表（V5）+ Admin POST/GET；`llm_judge.py --snapshot-url`（JWT 经 `EVAL_SNAPSHOT_JWT`）把指标随时间落库，Eval 看板出趋势——离线报告从"每次快照"变"时序可回归"
+- **测试**：`AdminAgentPlatformTest` 候选带出提问原文/导出格式/快照落库解析
+
+### 记忆补强：窗口、摘要、会话键
+- **token 预算窗口**：上下文按 `AGENT_MEMORY_TOKEN_BUDGET`（默认 4000 token，0=退回固定 20 条旧口径）从最新往回裁剪，超预算老消息由摘要承接语义；顺带修了旧裁剪把摘要消息一并裁掉的 bug
+- **摘要持久化**：压缩摘要从"只写 Redis（重启即丢）"变 Redis+`chat_session.summary` 双写，load 缺失时从 DB 恢复
+- **会话键唯一化**：chat_session 增 `session_key`（唯一索引），定位从"title 反查 + ORDER BY id DESC LIMIT 1"（title 非键，同名即歧义）升级为等值查询，title 反查仅存量兜底，写入幂等回填
+- **测试**：编译+全量回归覆盖（memory 无独立测试类，依赖既有 Controller 套件与真实链路）
+
+### 多智能体/路由：agent_type 从标签变架构（第一层）
+- **服务端裁决**（`AgentTypeResolver`）：已知类型采信（source=client），auto/空白/未知值关键词归类（source=classified），deep 是模式不是人设（人设按消息归类）；归类是关键词启发式——分类本身不该花一次 LLM 调用的钱，LLM 分类器是演进项
+- **差异化工具集**（边车 `AGENT_TOOLSETS`）：contract 聚焦知识/合同取证；**bi 严格只读**（连规划层都拿不到 create_purchase_order，HITL 之前多一道闸）；replenishment 含写工具（仍过图内 interrupt）；general 全量。`tool_specs(agent_type)` 过滤 + `_validate_calls` 越权丢弃（reason=tool-not-allowed-for-agent）双闸
+- **台账口径修正**：agent_run.model 此前错存 prompt 版本号——现在 model=真实对话模型（mock 记 "mock"），prompt_version 独立归因
+- **测试**：`AgentTypeResolverTest`（4 例）+ Python 差异化工具集/越权丢弃用例
+
+### 本轮明确"未做"的边界（诚实清单，防"叙事遮掩"）
+- **A/B 与灰度发布**：prompt 激活仍是全量切换（生效即全量），无按比例分流；需要时在 PromptRegistry 后加路由层
+- **语义缓存**：同问题重复取证仍重复付费（缓存去重的正确性边界未验证前不上）
+- **mem0/Zep 式结构化长期记忆**：只有"窗口+滚动摘要+DB 持久化"，无事实抽取/向量记忆库（interview-script 的 awareness 定位不变）
+- **多智能体编排（子代理/任务分解）**：本轮交付的是"差异化工具集+路由+预算"，单图多角色的第一层；真正的 planner-worker 编排仍未做
+- **在线影子评测（shadow eval）**：真实流量按比例跑 judge 采样未做（快照管道已就位，缺采样器）
+- **多轮/记忆专项评测集**：golden 全单轮，多轮对话质量无回归集
+
+
 ## 观测
 - 异步落库：ObservationService 计数器 + 线程池(2,4,60s,1000) 写入 agent_run/step/tool_call，失败仅告警
 - 跨语言 trace：TraceIdFilter 生成 X-Trace-Id，经 TraceContext ThreadLocal + MDC 透传至 PythonSidecar，回传 trace/tool_results/iters 落 agent_step
@@ -71,5 +117,8 @@ checkpointer 持久化验收（scripts/hitl_restart_drill.py，跨两个独立�
 - 缓存/MQ/k8s 维持"何时需要"演进叙事（interview-script），不过度工程。
 
 ## 数据模型
-agent_run(trace_id, user, session, agent_type, mode, latency, tokens, cost, token_source) -> agent_step(seq, node, digest) -> agent_tool_call(tool, args, result_digest)
-user_feedback(rating, comment) 驱动评测候选
+agent_run(trace_id, user, session, agent_type, mode, status, latency, tokens, cost, token_source, model, prompt_version) -> agent_step(seq, node, digest) -> agent_tool_call(tool, args, result_digest)
+chat_session(session_key 唯一, summary 摘要持久化) / chat_message
+prompt_version(agent_type, version, content, active) —— 运行时真实读取（PromptRegistry）
+eval_snapshot(source, report_file, metrics) —— 评测指标时序留痕
+user_feedback(rating, comment) → /admin/agent/eval/candidates 驱动评测候选

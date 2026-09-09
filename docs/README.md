@@ -9,6 +9,8 @@
 | [README.md](README.md)（本页） | 索引与复习路径 | — |
 | [architecture.md](architecture.md) | 分层、三条关键链路时序、配置切换、记忆、可观测，末尾附**设计决策记录**（每个"为什么"） | 最新 |
 | [code-map.md](code-map.md) | **源码导读**：请求全链路图 + 每个模块读哪些文件、按什么顺序 | 最新 |
+| [runtime-topology.md](runtime-topology.md) | **运行拓扑**：什么在哪台机器上跑（本机进程/Docker/VMware/CI 各管什么）、端口与数据归属、各场景启动序列、"连的是谁"30 秒自查 | 最新 |
+| [tech-glossary.md](tech-glossary.md) | **技术名词总表**（零基础向）：项目涉及的全部语言/框架/库/工具/概念，按层次分组逐个解释 | 最新 |
 | [lessons-learned.md](lessons-learned.md) | **开发问题复盘**：16 个真实问题，现象→排查→根因→修复→教训 | 最新（持续追加） |
 | [test-report.md](test-report.md) | 工程测试与量化报告（面试 STAR 数字，§8 一键重放） | 最新 |
 | [agent-ops.md](agent-ops.md) | 观测/评测/治理能力清单 + 按时间的演进日志（能力契约） | 最新 |

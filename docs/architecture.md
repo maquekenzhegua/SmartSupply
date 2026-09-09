@@ -60,6 +60,11 @@ Python 深度推理：前端 `useDeep=true` 且边车健康时 `PythonSidecarSer
 | 失败不伪装（ok=false 信封 / degraded 显式化） | agent 的信任边界：取证失败必须如实拒答（degrade_reason），禁止编造；降级路径与成功路径在台账/前端可区分 | 调用方需处理 degraded 形态 |
 | 评测双维：答案 LLM-as-judge + 工具轨迹 | 只评答案会漏"答对了但过程乱"（误调度/漏调度）；轨迹 precision/recall/f1 卡过程质量 | 轨迹集需维护 golden 期望序列 |
 | Token 双口径（actual 优先 / estimated 打标） | 网关不回传 usage 时观测不中断，但估算永不伪装成真实用量（token_source 随 trace 落库）；Java 台账独立走 jtokkit | 两套口径并存需在报表中标注来源 |
+| Prompt 生效走 DB 表 + 缓存失效（PromptRegistry） | 此前 prompt_version 表只写不读，"激活/回滚"不改运行时行为（假闭环）；现在 Admin 发布/激活 → evict → 下一次对话生效，版本号随 agent_run.prompt_version 落台账，评测可按版本归因 | DB 故障熔断 30s 回退内置默认（诚实降级）；直写内存的 upsert 已标 @Deprecated |
+| 规划/反思走廉价档模型（AI_MODEL_FAST），作答走主模型 | planner/reflector 是结构化轻任务，与最终作答同价是浪费；未配置 FAST 时回退主模型，零配置行为不变 | 两个档位都需配价格表，否则成本口径失真（ModelPricingTable 未配价大声告警） |
+| 成本管控分三层：单次运行 token 预算 / 用户日预算 / 模型价格表 | 记账（agent_run.cost_usd）只是观测，管控必须有闸：边车图内超预算提前收敛（如实标注 budget_exhausted，不算 degraded）、Java /chat 入口超日预算 429 拒绝、计价按模型查表 | 预算默认 0=关闭（显式开启才改行为）；Redis 不可用回退 DB 台账口径，口径故障宁可漏拦不可误拦 |
+| agent_type 服务端裁决 + 差异化工具集 | 前端传什么就是什么 → client 值采信 + auto/未知值关键词归类（分类本身不花一次 LLM 调用）；bi 严格只读（连规划层都拿不到写工具，HITL 之前多一道闸） | 关键词归类是启发式，归类结果进台账可审计；LLM 分类器是演进项不是现状 |
+| 在线评测闭环：低分反馈→候选→人工标注→回归集 | user_feedback 此前只有 GROUP BY 计数，"驱动评测候选"只存在于文档；现在候选 API 带出提问原文+运行上下文，导出 NDJSON ground_truth 留空——机器绝不代填正确答案 | 人工标注是闭环里无法自动化的一环；评测快照（eval_snapshot）补时序半边 |
 
 ## 扩展与治理
 
