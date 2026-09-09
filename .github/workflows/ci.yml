@@ -198,6 +198,8 @@ jobs:
           python scripts/llm_judge.py --mode real --recall bigram --out docs/eval-report-real-ci.md
           # llm_judge 内部已默认 faith>=1.2 门禁；此处为报告解析层的双保险
           python scripts/check_gate.py docs/eval-report-real-ci.md --min-hit 0.6 --min-faithfulness 1.2
+          # 回归对比：与入库的脱敏汇总基线比，相对跌幅>10% 即 FAIL（快照 API 在 CI 无后端不可达）
+          python scripts/compare_eval.py --report docs/eval-report-real-ci.md --baseline-report ../docs/eval-report-real-summary.md
           # trajectory（真实模型）：信息性收集（真实模型规划可合理偏离 golden 关键词口径，暂不设门禁）
           python scripts/eval_trajectory.py --mode real --out docs/eval-trajectory-real-ci.md
       - uses: actions/upload-artifact@v4

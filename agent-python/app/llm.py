@@ -110,6 +110,16 @@ def _muse_spec(model: Optional[str] = None) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _muse_headers(spec: Dict[str, Any], accept: Optional[str] = None) -> Dict[str, str]:
+    """muse 请求头：仅配置了 key 才带 Authorization（无 key 时发 "Bearer None" 是非法头）。"""
+    headers: Dict[str, str] = {"Content-Type": "application/json", **_opencode_headers()}
+    if spec.get("key"):
+        headers["Authorization"] = f"Bearer {spec['key']}"
+    if accept:
+        headers["Accept"] = accept
+    return headers
+
+
 def _usage_from_muse(u: Dict[str, Any]) -> Dict[str, Any]:
     return {"prompt_tokens": int(u.get("input_tokens", u.get("prompt_tokens", 0)) or 0),
             "completion_tokens": int(u.get("output_tokens", u.get("completion_tokens", 0)) or 0),
@@ -154,9 +164,7 @@ async def _muse_responses(messages: List[Dict[str, str]], tools: Optional[List[D
                              "parameters": t["function"].get("parameters", {})} for t in tools]
     try:
         r = await _http_client().post(f"{spec['base']}/responses",
-                                      headers={"Authorization": f"Bearer {spec['key']}", "Content-Type": "application/json",
-                                               **_opencode_headers()},
-                                      json=payload)
+                                      headers=_muse_headers(spec), json=payload)
         r.raise_for_status()
     except httpx.HTTPStatusError as e:
         code = e.response.status_code
@@ -298,8 +306,7 @@ async def _muse_stream(messages: List[Dict[str, str]], spec: Dict[str, Any], usa
     try:
         async with _http_client().stream(
                 "POST", f"{spec['base']}/responses",
-                headers={"Authorization": f"Bearer {spec['key']}", "Content-Type": "application/json",
-                         "Accept": "text/event-stream", **_opencode_headers()},
+                headers=_muse_headers(spec, accept="text/event-stream"),
                 json=payload) as r:
             if r.status_code != 200:
                 body = (await r.aread()).decode("utf-8", "replace")[:200]

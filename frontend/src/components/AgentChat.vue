@@ -175,12 +175,13 @@ const messages = ref<{ role: 'user' | 'assistant'; content: string; agentType?: 
 const traces = ref<Record<number, { run: any; steps: any[]; toolCalls: any[] }>>({})
 const msgRef = ref<HTMLElement>()
 
-// 生成中止控制：用户可点"停止生成"，组件卸载时也会中止，避免流在后台继续消耗
-let abortController: AbortController | null = null
+// 生成中止控制：每个请求持有独立 controller（模块级单例会被并发流覆盖，旧流从此
+// 无法被"停止生成"停止）；"停止生成"中止当前全部活跃流，组件卸载时同样全部中止
+const activeControllers = new Set<AbortController>()
 function stopGen() {
-  abortController?.abort()
+  activeControllers.forEach((c) => c.abort())
 }
-onBeforeUnmount(() => abortController?.abort())
+onBeforeUnmount(() => activeControllers.forEach((c) => c.abort()))
 
 // 工具调用/引用来源折叠卡片状态
 const folds = ref<Record<string, boolean>>({})
@@ -248,14 +249,18 @@ watch(() => props.initialQuery, (v) => { if (v) input.value = v })
 async function loadMode() {
   try {
     const r = await request.get('/agent/mode'); const d = r.data.data || r.data; deepEnabled.value = !!d.pythonSidecarEnabled
-  } catch {}
+  } catch (e) {
+    console.warn('[agent] 深度模式开关查询失败，按前端默认处理', e)
+  }
 }
 async function loadTools() {
   try {
     const res = await request.get('/agent/tools')
     const data = res.data.data || res.data
     toolList.value = Array.isArray(data) ? data : []
-  } catch {}
+  } catch (e) {
+    console.warn('[agent] 工具清单查询失败，工具提示将不可用', e)
+  }
 }
 
 async function send() {
@@ -304,8 +309,9 @@ function sseTimeoutMs() {
 }
 
 async function sendStream(text: string, confirmed = false, resumeInfo?: { threadId: string; approved: boolean }) {
-  abortController = new AbortController()
-  const timeoutId = window.setTimeout(() => abortController?.abort(), sseTimeoutMs())
+  const ctrl = new AbortController()
+  activeControllers.add(ctrl)
+  const timeoutId = window.setTimeout(() => ctrl.abort(), sseTimeoutMs())
   let streamStarted = false
   let bubble: { role: 'user' | 'assistant'; content: string; agentType?: string } | null = null
   try {
@@ -317,9 +323,17 @@ async function sendStream(text: string, confirmed = false, resumeInfo?: { thread
         useDeep: resumeInfo ? 'true' : String(useDeep.value), confirmCreate: String(confirmed),
         ...(resumeInfo ? { resume: 'true', threadId: resumeInfo.threadId, confirmApprove: String(resumeInfo.approved) } : {}),
       }),
-      signal: abortController.signal,
+      signal: ctrl.signal,
     })
     if (!resp.ok || !resp.body) {
+      // 流式通道走裸 fetch，必须自己处理 401：token 过期时与统一拦截器同口径——
+      // 清凭证跳登录（此前只显示"HTTP 401"，用户停在原地无法自愈）
+      if (resp.status === 401) {
+        localStorage.removeItem('token')
+        localStorage.removeItem('username')
+        if (location.pathname !== '/login') location.href = '/login'
+        return
+      }
       // 不再静默降级：鉴权/限流类错误如实呈现；仅 5xx/网关异常尝试一次非流式兜底
       let msg = `流式请求失败（HTTP ${resp.status}）`
       try {
@@ -418,7 +432,7 @@ async function sendStream(text: string, confirmed = false, resumeInfo?: { thread
     }
   } finally {
     window.clearTimeout(timeoutId)
-    abortController = null
+    activeControllers.delete(ctrl)
   }
 }
 
@@ -437,7 +451,15 @@ async function nonStreamFallback(text: string, reason: string) {
 }
 
 async function feedback(idx: number, rating: number) {
-  try { const m = messages.value[idx] as any; await request.post('/agent/feedback', { runId: m.runId, sessionId: sessionId.value, rating }) ; ElMessage.success(rating>0?'已点赞':'已点踩') } catch {}
+  try {
+    const m = messages.value[idx] as any
+    await request.post('/agent/feedback', { runId: m.runId, sessionId: sessionId.value, rating })
+    ElMessage.success(rating > 0 ? '已点赞' : '已点踩')
+  } catch (e) {
+    // 用户点了按钮就应得到结果反馈，静默吞掉会让人以为点成功了
+    console.warn('[agent] 反馈提交失败', e)
+    ElMessage.error('反馈提交失败，请稍后重试')
+  }
 }
 function clearSession() {
   sessionId.value = 'sess-' + Math.random().toString(36).slice(2, 8)

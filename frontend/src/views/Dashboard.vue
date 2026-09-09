@@ -115,11 +115,20 @@ const catOption = computed(() => ({
 }))
 
 onMounted(async () => {
+  // 三个独立数据源并行拉取（此前串行 await，白首屏时间三倍叠加）
   try {
-    const s = await api.statsSummary(); summary.value = s
-    const cats = await api.categoryStock(); catRows.value = cats as Record<string, unknown>[]
-    const inv = await api.inventory({ page: 1, size: 5 }); lowStockWarn.value = (inv.records || []).filter((r: Record<string, unknown>) => r.below_safety)
-  } catch {} finally { loading.value = false }
+    const [s, cats, inv] = await Promise.all([
+      api.statsSummary(),
+      api.categoryStock(),
+      api.inventory({ page: 1, size: 5 }),
+    ])
+    summary.value = s
+    catRows.value = cats as Record<string, unknown>[]
+    lowStockWarn.value = (inv.records || []).filter((r: Record<string, unknown>) => r.below_safety)
+  } catch (e) {
+    // 每个请求失败时 axios 拦截器已 toast 具体原因；这里补日志避免整块静默空白无法归因
+    console.warn('[dashboard] 数据加载失败（图表区可能显示为空）', e)
+  } finally { loading.value = false }
 })
 </script>
 

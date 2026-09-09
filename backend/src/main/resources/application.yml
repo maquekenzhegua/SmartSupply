@@ -79,7 +79,7 @@ smartsupply:
 security:
   cors:
     # 精确白名单（逗号分隔），不再 "*" + credentials
-    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000,http://127.0.0.1:3000}
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000,http://127.0.0.1:3001}
 
 knife4j:
   enable: true

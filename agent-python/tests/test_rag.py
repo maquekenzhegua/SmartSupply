@@ -1,60 +1,56 @@
 r"""
-RAG 回归（落到 D:\conda_envs\ai-backend 可跑，无需真实 LLM/PG）：
-- 切分：800/100 中文友好
-- 本地向量：chromadb 内存集合 + 归一化伪向量（与 Java MockEmbeddingModel 一致语义）
-- 召回：离线关键词兜底
-- 评估：ragas/datasets 已装到 ai-backend，仅做可用性校验（不发真实 LLM）
+RAG 侧回归（离线可跑，无需真实 LLM/PG）：
+- rerank：词面打分排序正确性 + cross-encoder 回退事实标记（此前 Python 侧零覆盖，
+  旧"切分/chromadb"用例测试的是用例自己内联的实现与第三方库，对产品代码零覆盖，已移除）
+- 召回端点：诚实转发 Java（成功透传 / 不可达 502）
 """
-import random
-
 import pytest
-
-pytest.importorskip("chromadb")
-import chromadb
 
 from fastapi.testclient import TestClient
 
 from app.main import app
 
-
-def pseudo_vector(text: str, dims: int = 1536):
-    r = random.Random(hash(text) & 0x7FFFFFFF)
-    v = [r.uniform(-1, 1) for _ in range(dims)]
-    norm = sum(x * x for x in v) ** 0.5 or 1.0
-    return [x / norm for x in v]
+from app import rerank as R
 
 
-def test_splitter_over_chunk_long_text():
-    from app.main import app as _  # ensure import side-effects ok
-    # 复用 Java 侧的切分语义：800/100，这里做等价校验（Python 侧未独立实现 splitter）
-    text = "A" * 2500
-    # 简单模拟：按 800 窗口 100 overlap 至少 3 段
-    chunk_size, overlap = 800, 100
-    chunks = []
-    s = 0
-    while s < len(text):
-        e = min(s + chunk_size, len(text))
-        chunks.append(text[s:e])
-        if e >= len(text):
-            break
-        s = e - overlap
-    assert len(chunks) >= 3
-    assert all(len(c) <= 800 for c in chunks)
+DOCS = [
+    {"id": 1, "title": "风控规范", "content": "禁止无限连带责任条款，违约金不得超过合同额30%"},
+    {"id": 2, "title": "库存制度", "content": "SKU 低于安全库存时应触发补货流程"},
+    {"id": 3, "title": "交付条款", "content": "合同约定尽快交付不算明确的交付时间"},
+]
 
 
-def test_chromadb_local_vector_roundtrip():
-    client = chromadb.Client()
-    # chromadb collection name must be 3+ chars, use test-rag-xxx
-    col = client.create_collection("test-rag-pytest-chroma")
-    doc = "禁止无限连带责任；违约金不得超过合同额30%"
-    vec = pseudo_vector(doc)
-    col.add(ids=["doc1"], documents=[doc], embeddings=[vec])
-    res = col.query(query_embeddings=[vec], n_results=1)
-    assert res["documents"][0][0] == doc
-    # 近似查询：同语义短句应召回
-    q = pseudo_vector("无限连带责任")
-    res2 = col.query(query_embeddings=[q], n_results=1)
-    assert len(res2["documents"][0]) == 1
+def test_bm25_mode_ranks_relevant_doc_first():
+    out = R.rerank("无限连带责任 违约金", DOCS, top_k=3, mode="bm25")
+    assert out["mode"] == "bm25" and out["fallback"] is False
+    assert out["reranked"][0]["id"] == 1, "与查询强相关的文档必须排第一"
+    assert len(out["scores"]) == 3 and out["scores"][0] >= out["scores"][-1]
+
+
+def test_empty_docs_short_circuits():
+    out = R.rerank("任意", [], top_k=2, mode="bm25")
+    assert out == {"reranked": [], "mode": "none", "fallback": False}
+
+
+def test_cross_encoder_unavailable_marks_fallback(monkeypatch):
+    """cross-encoder 不可用时回退词面打分，且回退事实必须体现在 fallback 字段。"""
+    monkeypatch.setattr(R, "_try_load_cross", lambda: None)
+    monkeypatch.setattr(R, "_cross_failed", True)
+    out = R.rerank("无限连带责任", DOCS, top_k=2, mode="auto")
+    assert out["mode"] == "bm25" and out["fallback"] is True
+    assert out["reranked"][0]["id"] == 1
+
+
+def test_cross_encoder_predict_failure_marks_fallback(monkeypatch):
+    """加载成功但 predict 失败同样属于回退，绝不能让调用方误以为结果是 cross-encoder 打分。"""
+    class Boom:
+        def predict(self, pairs):
+            raise RuntimeError("cuda oom")
+    monkeypatch.setattr(R, "_try_load_cross", lambda: Boom())
+    monkeypatch.setattr(R, "_cross_failed", False)
+    out = R.rerank("库存 补货", DOCS, top_k=2, mode="auto")
+    assert out["mode"] == "bm25" and out["fallback"] is True
+    assert out["reranked"][0]["id"] == 2
 
 
 def test_fastapi_rag_recall_forwards_to_java(monkeypatch):

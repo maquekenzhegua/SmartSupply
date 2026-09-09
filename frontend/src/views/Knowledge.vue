@@ -51,7 +51,7 @@ async function load() {
 }
 async function beforeUpload(file: File) {
   const fd = new FormData(); fd.append('file', file)
-  try { await request.post('/knowledge/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } }); ElMessage.success('已入库'); load() } catch {}
+  try { await request.post('/knowledge/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } }); ElMessage.success('已入库'); load() } catch (e) { console.warn('[knowledge] 上传入库失败（拦截器已提示）', e) }
   return false
 }
 async function submitText() {
