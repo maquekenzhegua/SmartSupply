@@ -3,6 +3,7 @@ package com.smartsupply.module.supplier;
 import com.smartsupply.common.PageResult;
 import com.smartsupply.common.Result;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -32,6 +33,8 @@ public class SupplierController {
         return Result.ok(new PageResult<>(rows, total==null?0:total, page, size));
     }
 
+    // 写接口统一 ADMIN：与 Agent 写工具（ToolSecurity）同口径，普通用户可读不可写
+    @PreAuthorize("hasRole('ADMIN')")
     @PostMapping
     public Result<Map<String, Object>> create(@RequestBody Map<String, Object> body) {
         jdbc.update("INSERT INTO supplier(name, contact_name, contact_phone, email, address) VALUES (?,?,?,?,?)",

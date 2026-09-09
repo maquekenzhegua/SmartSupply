@@ -6,6 +6,7 @@ import com.smartsupply.common.PageResult;
 import com.smartsupply.common.Result;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -36,15 +37,17 @@ public class ContractController {
         return Result.ok(new PageResult<>(rows, total==null?0:total, page, size));
     }
 
+    // 上传会写库 + RAG 入库 + LLM 风控分析（重操作），统一 ADMIN
+    @PreAuthorize("hasRole('ADMIN')")
     @PostMapping("/upload")
     public Result<Map<String, Object>> upload(@RequestParam("file") MultipartFile file,
                                               @RequestParam(value="supplierId", required=false) Long supplierId) throws Exception {
         String text = parser.parse(file);
         String fileName = file.getOriginalFilename() == null ? "未命名合同" : file.getOriginalFilename();
         if (text.isBlank()) return Result.fail(400, "文件解析为空");
-        jdbc.update("INSERT INTO contract(title, supplier_id, file_name, status) VALUES (?,?,?,?)",
+        Long contractId = com.smartsupply.common.DbHelper.insertAndReturnId(jdbc,
+                "INSERT INTO contract(title, supplier_id, file_name, status) VALUES (?,?,?,?)",
                 fileName, supplierId, fileName, "REVIEWING");
-        Long contractId = com.smartsupply.common.DbHelper.lastInsertIdByUnique(jdbc, "contract", "title", fileName);
         ragService.ingest(fileName, text, "CONTRACT");
         String context = ragService.recall("合同风控 无限连带责任 违约金 交付时间");
         String prompt = "你是合同风控专家。结合公司风控规范：\n" + context + "\n\n请分析以下合同文本，抽取关键要素并标红风险条款、给出修改建议：\n" + text.substring(0, Math.min(text.length(), 6000));

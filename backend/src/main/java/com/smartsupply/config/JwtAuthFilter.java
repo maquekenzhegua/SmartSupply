@@ -34,7 +34,14 @@ public class JwtAuthFilter extends OncePerRequestFilter {
                 var auth = new UsernamePasswordAuthenticationToken(
                         username, null, List.of(new SimpleGrantedAuthority("ROLE_" + role)));
                 SecurityContextHolder.getContext().setAuthentication(auth);
-            } catch (Exception ignored) {}
+            } catch (Exception e) {
+                // 携带了 token 但解析失败（过期/篡改/格式错误）：显式 401 而非静默降级为匿名。
+                // 此前吞掉异常导致过期 token 得到匿名 403"无权限"，前端 401→跳登录 的链路永不触发。
+                response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+                response.setContentType("application/json;charset=UTF-8");
+                response.getWriter().write("{\"code\":401,\"msg\":\"登录已过期，请重新登录\",\"data\":null}");
+                return;
+            }
         }
         chain.doFilter(request, response);
     }

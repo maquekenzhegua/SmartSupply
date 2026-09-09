@@ -2,6 +2,7 @@ package com.smartsupply.module.supplier;
 
 import com.smartsupply.common.Result;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -26,6 +27,7 @@ public class SupplierExtraController {
         } catch (Exception e) { return Result.fail(404, "供应商不存在"); }
     }
 
+    @PreAuthorize("hasRole('ADMIN')")
     @PutMapping("/{id}")
     public Result<Void> update(@PathVariable long id, @RequestBody Map<String, Object> body) {
         int rows = jdbc.update("UPDATE supplier SET name=?, contact_name=?, contact_phone=?, email=?, address=?, rating=? WHERE id=?",
@@ -34,6 +36,7 @@ public class SupplierExtraController {
         return Result.ok();
     }
 
+    @PreAuthorize("hasRole('ADMIN')")
     @DeleteMapping("/{id}")
     public Result<Void> delete(@PathVariable long id) {
         long po = jdbc.queryForObject("SELECT COUNT(*) FROM purchase_order WHERE supplier_id=?", Long.class, id);

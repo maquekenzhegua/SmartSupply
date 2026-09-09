@@ -126,9 +126,10 @@ public class RagService {
 
     /** 分段入库：knowledge_doc 存原文，knowledge_chunk/vectorStore 存向量 */
     public Long ingest(String title, String content, String sourceType) {
-        jdbc.update("INSERT INTO knowledge_doc(title, source_type, content) VALUES (?,?,?)",
+        // title 无 UNIQUE 约束，不得按 title 反查 id（并发同名会挂错父行）；直接取生成主键
+        Long docId = com.smartsupply.common.DbHelper.insertAndReturnId(jdbc,
+                "INSERT INTO knowledge_doc(title, source_type, content) VALUES (?,?,?)",
                 title, sourceType == null ? "UPLOAD" : sourceType, content);
-        Long docId = com.smartsupply.common.DbHelper.lastInsertIdByUnique(jdbc, "knowledge_doc", "title", title);
         List<String> chunks = TextSplitter.split(content);
         List<Document> docs = new ArrayList<>();
         for (int i = 0; i < chunks.size(); i++) {

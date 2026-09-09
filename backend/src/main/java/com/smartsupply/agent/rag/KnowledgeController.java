@@ -4,6 +4,7 @@ import com.smartsupply.common.PageResult;
 import com.smartsupply.common.RateLimit;
 import com.smartsupply.common.Result;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -33,6 +34,8 @@ public class KnowledgeController {
         return Result.ok(new PageResult<>(rows, total == null ? 0 : total, page, size));
     }
 
+    // 知识库写路径统一 ADMIN（上传/录入/删除）；recall 为只读保持登录即可
+    @PreAuthorize("hasRole('ADMIN')")
     @PostMapping("/upload")
     @RateLimit(permitsPerMinute = 20, key = "knowledge-upload")
     public Result<Map<String, Object>> upload(@RequestParam("file") MultipartFile file) throws Exception {
@@ -43,6 +46,7 @@ public class KnowledgeController {
         return Result.ok(Map.of("docId", docId, "title", title, "chunks", TextSplitter.split(text).size()));
     }
 
+    @PreAuthorize("hasRole('ADMIN')")
     @PostMapping("/text")
     public Result<Map<String, Object>> ingestText(@RequestBody Map<String, String> body) {
         String title = body.getOrDefault("title", "手动录入");
@@ -52,6 +56,7 @@ public class KnowledgeController {
         return Result.ok(Map.of("docId", docId));
     }
 
+    @PreAuthorize("hasRole('ADMIN')")
     @DeleteMapping("/{id}")
     public Result<Void> delete(@PathVariable long id) {
         jdbc.update("DELETE FROM knowledge_doc WHERE id=?", id);

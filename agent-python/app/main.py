@@ -5,6 +5,7 @@ from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import json as _json
+import secrets as _secrets
 import time, uuid
 
 from . import config
@@ -40,7 +41,7 @@ _api_key_header = APIKeyHeader(name="X-Api-Key", auto_error=False)
 
 async def require_api_key(x_api_key: str = Security(_api_key_header)) -> None:
     expected = config.SIDECAR_API_KEY
-    if expected and x_api_key != expected:
+    if expected and not _secrets.compare_digest(x_api_key or "", expected):
         raise HTTPException(status_code=401, detail="invalid api key")
 
 
@@ -167,7 +168,9 @@ class RerankRequest(BaseModel):
     mode: str = "auto"
 
 
-@app.post("/api/rag/recall")
+# 鉴权面必须完整：/api/rag/* 会回环调用 Java（recall 转发）或执行 CPU 重排推理，
+# 与 /api/reason* 同样纳入 X-Api-Key 保护——此前漏掉，配了 key 也拦不住这两个端点
+@app.post("/api/rag/recall", dependencies=[Depends(require_api_key)])
 async def rag_recall(req: RecallRequest):
     """真实召回：转发 Java /api/knowledge/recall（pgvector + 重排）。
     此前是返回固定文案的占位假接口——调用方会把它当真召回结果使用，已改为诚实转发：
@@ -185,7 +188,7 @@ async def rag_recall(req: RecallRequest):
     return JSONResponse(status_code=502, content={"query": req.query, "error": "召回接口返回无法解析", "degraded": True})
 
 
-@app.post("/api/rag/rerank")
+@app.post("/api/rag/rerank", dependencies=[Depends(require_api_key)])
 async def rag_rerank(req: RerankRequest):
     try:
         data = py_rerank(req.query, req.docs, top_k=req.topK, mode=req.mode)

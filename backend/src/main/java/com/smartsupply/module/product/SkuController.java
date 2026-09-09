@@ -3,6 +3,7 @@ package com.smartsupply.module.product;
 import com.smartsupply.common.PageResult;
 import com.smartsupply.common.Result;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -33,17 +34,19 @@ public class SkuController {
         return Result.ok(new PageResult<>(rows, total == null ? 0 : total, page, size));
     }
 
+    @PreAuthorize("hasRole('ADMIN')")
     @PostMapping
     public Result<Map<String, Object>> create(@RequestBody Map<String, Object> body) {
         Object productId = body.get("productId");
         Object skuCode = body.get("skuCode");
         if (productId == null || skuCode == null || String.valueOf(skuCode).isBlank()) return Result.fail(400, "productId 与 skuCode 不能为空");
-        jdbc.update("INSERT INTO sku(product_id, sku_code, spec, cost_price, sale_price) VALUES (?,?,?,?,?)",
+        Long id = com.smartsupply.common.DbHelper.insertAndReturnId(jdbc,
+                "INSERT INTO sku(product_id, sku_code, spec, cost_price, sale_price) VALUES (?,?,?,?,?)",
                 productId, String.valueOf(skuCode), body.get("spec"), body.get("costPrice"), body.get("salePrice"));
-        Long id = com.smartsupply.common.DbHelper.lastInsertIdByUnique(jdbc, "sku", "sku_code", String.valueOf(skuCode));
         return Result.ok(Map.of("id", id == null ? 0 : id));
     }
 
+    @PreAuthorize("hasRole('ADMIN')")
     @PutMapping("/{id}")
     public Result<Void> update(@PathVariable long id, @RequestBody Map<String, Object> body) {
         int rows = jdbc.update("UPDATE sku SET sku_code=?, spec=?, cost_price=?, sale_price=? WHERE id=?",
@@ -52,6 +55,7 @@ public class SkuController {
         return Result.ok();
     }
 
+    @PreAuthorize("hasRole('ADMIN')")
     @DeleteMapping("/{id}")
     public Result<Void> delete(@PathVariable long id) {
         long inv = jdbc.queryForObject("SELECT COUNT(*) FROM inventory WHERE sku_id=?", Long.class, id);

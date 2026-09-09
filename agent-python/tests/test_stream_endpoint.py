@@ -129,3 +129,19 @@ def test_stream_requires_api_key_when_configured(monkeypatch):
     monkeypatch.setattr(config, "SIDECAR_API_KEY", "")
     r3 = client.post("/api/reason", json=body)
     assert r3.status_code == 200
+
+
+def test_rag_endpoints_require_api_key_when_configured(monkeypatch):
+    """鉴权面完整性回归：/api/rag/recall、/api/rag/rerank 与 /api/reason* 同受 X-Api-Key 保护
+    （此前这两个端点漏在鉴权面外，配了 key 也拦不住 recall 的 Java 回环与 rerank 的 CPU 推理）。"""
+    monkeypatch.setattr(config, "SIDECAR_API_KEY", "secret-key-123")
+    client = TestClient(app)
+    assert client.post("/api/rag/recall", json={"query": "风控"}).status_code == 401
+    assert client.post("/api/rag/rerank", json={"query": "q", "docs": []}).status_code == 401
+    assert client.post("/api/rag/recall", json={"query": "风控"},
+                       headers={"X-Api-Key": "secret-key-123"}).status_code in (200, 502)  # 已过鉴权（502=Java 不可达）
+    assert client.post("/api/rag/rerank", json={"query": "q", "docs": [], "mode": "bm25"},
+                       headers={"X-Api-Key": "secret-key-123"}).status_code == 200
+    # 未配置密钥（默认）时零配置可用
+    monkeypatch.setattr(config, "SIDECAR_API_KEY", "")
+    assert client.post("/api/rag/rerank", json={"query": "q", "docs": []}).status_code == 200

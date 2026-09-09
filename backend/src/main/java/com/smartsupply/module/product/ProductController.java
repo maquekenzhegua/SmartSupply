@@ -4,6 +4,7 @@ import com.smartsupply.common.PageResult;
 import com.smartsupply.common.Result;
 import jakarta.validation.constraints.NotBlank;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -44,15 +45,17 @@ public class ProductController {
         return Result.ok(row);
     }
 
+    @PreAuthorize("hasRole('ADMIN')")
     @PostMapping
     public Result<Map<String, Object>> create(@RequestBody CreateReq req) {
         if (req.name() == null || req.name().isBlank()) return Result.fail(400, "商品名称不能为空");
-        jdbc.update("INSERT INTO product(name, category, unit, bar_code) VALUES (?,?,?,?)",
+        Long id = com.smartsupply.common.DbHelper.insertAndReturnId(jdbc,
+                "INSERT INTO product(name, category, unit, bar_code) VALUES (?,?,?,?)",
                 req.name(), req.category(), req.unit(), req.barCode());
-        Long id = com.smartsupply.common.DbHelper.lastInsertIdByUnique(jdbc, "product", "name", req.name());
         return Result.ok(Map.of("id", id == null ? 0 : id));
     }
 
+    @PreAuthorize("hasRole('ADMIN')")
     @PutMapping("/{id}")
     public Result<Void> update(@PathVariable long id, @RequestBody CreateReq req) {
         int rows = jdbc.update("UPDATE product SET name=?, category=?, unit=?, bar_code=? WHERE id=?",
@@ -61,6 +64,7 @@ public class ProductController {
         return Result.ok();
     }
 
+    @PreAuthorize("hasRole('ADMIN')")
     @DeleteMapping("/{id}")
     public Result<Void> delete(@PathVariable long id) {
         long skuCnt = jdbc.queryForObject("SELECT COUNT(*) FROM sku WHERE product_id=?", Long.class, id);

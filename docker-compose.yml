@@ -39,8 +39,12 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       AI_MODEL: ${AI_MODEL:-gpt-4o-mini}
-      SIDECAR_USERNAME: ${SIDECAR_USERNAME:-admin}
-      SIDECAR_PASSWORD: ${SIDECAR_PASSWORD:-admin123}
+      # fail-closed：服务账号不再内置弱口令兜底（与 config.py 修复同口径）——未显式配置时
+      # 边车直调场景的工具回环如实 401，需要该能力须在 .env 设置。SIDECAR_API_KEY 同理：
+      # 8001 发布到宿主机，生产/共享网络必须配（Java 侧同配 AGENT_PYTHON_API_KEY）
+      SIDECAR_USERNAME: ${SIDECAR_USERNAME:-}
+      SIDECAR_PASSWORD: ${SIDECAR_PASSWORD:-}
+      SIDECAR_API_KEY: ${SIDECAR_API_KEY:-}
       # 可观测性（可选）：配置 LANGFUSE_* 后一次 agent 运行 = 一条 trace（含 plan/tool/reasoner 埋点）
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
@@ -49,7 +53,7 @@ services:
       # 指向 Postgres 后重启/多实例仍可恢复待审批的写操作。checkpoint_* 表由边车 setup() 幂等建表
       CHECKPOINT_URI: ${CHECKPOINT_URI:-postgresql://${POSTGRES_USER:-dev}:${POSTGRES_PASSWORD:-change-me-strong-password}@postgres:5432/smartsupply}
     ports:
-      - "8001:8001"
+      - "127.0.0.1:8001:8001"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

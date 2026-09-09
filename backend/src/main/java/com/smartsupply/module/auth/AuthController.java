@@ -1,5 +1,6 @@
 package com.smartsupply.module.auth;
 
+import com.smartsupply.common.RateLimit;
 import com.smartsupply.common.Result;
 import io.jsonwebtoken.Claims;
 import org.slf4j.Logger;
@@ -27,6 +28,9 @@ public class AuthController {
         this.jdbc = jdbc;
     }
 
+    // 登录爆破防线：此前 /api/auth/** permitAll 且无限流，可无限尝试密码；
+    // 10 次/分钟/IP（Redis Lua 计数，多实例一致），配合防用户名枚举的同文案设计
+    @RateLimit(permitsPerMinute = 10, key = "login")
     @PostMapping("/login")
     public Result<Map<String, String>> login(@RequestBody Map<String, String> body) {
         String username = body.getOrDefault("username", "").trim();

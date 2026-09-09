@@ -60,6 +60,19 @@ class PostgresRegressionTest {
     @Autowired MockMvc mvc;
     @Autowired ObjectMapper om;
     @Autowired JdbcTemplate jdbc;
+    @Autowired org.springframework.data.redis.core.StringRedisTemplate stringRedis;
+
+    @org.junit.jupiter.api.BeforeEach
+    void flushPurchaseIdempotencyKeys() {
+        // 测试隔离：PG 容器每次全新，但 Redis（localhost）跨运行共享——agentWrite 的固定
+        // payload 在 10 分钟 TTL 内会命中上次运行留下的幂等键，返回 success=false
+        try {
+            var keys = stringRedis.keys("idem:po:*");
+            if (keys != null && !keys.isEmpty()) stringRedis.delete(keys);
+        } catch (Exception ignored) {
+            // Redis 不可用时幂等服务本身走诚实降级，不阻塞回归
+        }
+    }
 
     private String token() throws Exception {
         return mvc.perform(post("/api/auth/login")
@@ -155,5 +168,43 @@ class PostgresRegressionTest {
         Integer flows = jdbc.queryForObject(
                 "SELECT count(*) FROM inventory_flow WHERE reason LIKE '采购入库 %'", Integer.class);
         assertThat(flows).isGreaterThanOrEqualTo(1);
+    }
+
+    @Test
+    void concurrentAdjustCannotOversellOnRealPg() throws Exception {
+        // 真 PG 行锁回归：两个并发调整各扣超过一半库存，旧的"读-改-写绝对值覆盖"实现下
+        // 两个都会成功且互相覆盖；原子增量 UPDATE（WHERE quantity+? >= 0）必须恰好一个成功。
+        String t = tokenBody();
+        Integer base = jdbc.queryForObject(
+                "SELECT quantity FROM inventory WHERE sku_id=1 AND warehouse_id=1", Integer.class);
+        int take = base / 2 + 1;
+        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            var futures = new java.util.ArrayList<java.util.concurrent.Future<Integer>>();
+            for (int i = 0; i < 2; i++) {
+                futures.add(pool.submit(() -> {
+                    // 业务错误码在响应体（Result.fail 为 HTTP 200 + body code），必须解析 body
+                    String body = mvc.perform(post("/api/inventory/adjust")
+                                    .header("Authorization", "Bearer " + t)
+                                    .contentType(MediaType.APPLICATION_JSON)
+                                    .content(om.writeValueAsString(Map.of(
+                                            "skuId", 1, "warehouseId", 1, "changeQty", -take))))
+                            .andReturn().getResponse().getContentAsString();
+                    return om.readTree(body).path("code").asInt();
+                }));
+            }
+            int ok = 0, rejected = 0;
+            for (var f : futures) {
+                int code = f.get(30, java.util.concurrent.TimeUnit.SECONDS);
+                if (code == 200) ok++; else rejected++;
+            }
+            assertThat(ok).as("并发双扣必须恰好一个成功").isEqualTo(1);
+            assertThat(rejected).as("另一个必须被非负守卫拒绝").isEqualTo(1);
+            Integer after = jdbc.queryForObject(
+                    "SELECT quantity FROM inventory WHERE sku_id=1 AND warehouse_id=1", Integer.class);
+            assertThat(after).isEqualTo(base - take);
+        } finally {
+            pool.shutdownNow();
+        }
     }
 }

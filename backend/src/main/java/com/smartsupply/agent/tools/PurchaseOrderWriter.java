@@ -31,9 +31,9 @@ public class PurchaseOrderWriter {
         } catch (EmptyResultDataAccessException e) {
             creatorId = null; // 操作人用户名进 remark 留审计，id 缺失不阻断业务写入
         }
-        jdbc.update("INSERT INTO purchase_order(order_no, supplier_id, status, total_amount, remark, created_by) VALUES (?,?,?,?,?,?)",
+        Long orderId = DbHelper.insertAndReturnId(jdbc,
+                "INSERT INTO purchase_order(order_no, supplier_id, status, total_amount, remark, created_by) VALUES (?,?,?,?,?,?)",
                 orderNo, supplierId, "DRAFT", amount, remark, creatorId);
-        Long orderId = DbHelper.lastInsertIdByUnique(jdbc, "purchase_order", "order_no", orderNo);
         jdbc.update("INSERT INTO purchase_order_item(order_id, sku_id, quantity, unit_price, amount) VALUES (?,?,?,?,?)",
                 orderId, skuId, quantity, unitPrice, amount);
         return orderId;

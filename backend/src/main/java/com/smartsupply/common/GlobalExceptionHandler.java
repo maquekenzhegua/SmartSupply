@@ -8,7 +8,7 @@ import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
 
-import java.nio.file.AccessDeniedException;
+import org.springframework.security.access.AccessDeniedException;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -50,6 +50,8 @@ public class GlobalExceptionHandler {
         return Result.fail(400, "上传文件过大");
     }
 
+    // 方法级安全（@PreAuthorize）拒绝统一 403 JSON——此前误导入 java.nio.file.AccessDeniedException，
+    // 安全拒绝落入兜底 500 并在非 prod 泄漏内部信息（真实事故回归点，配 SecurityRbacTest 守护）
     @ExceptionHandler(AccessDeniedException.class)
     @ResponseStatus(HttpStatus.FORBIDDEN)
     public Result<Void> forbidden(AccessDeniedException e) {

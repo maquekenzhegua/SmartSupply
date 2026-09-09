@@ -3,6 +3,7 @@ package com.smartsupply.module.warehouse;
 import com.smartsupply.common.PageResult;
 import com.smartsupply.common.Result;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -29,15 +30,17 @@ public class WarehouseController {
         return Result.ok(jdbc.queryForList("SELECT id, name FROM warehouse ORDER BY id"));
     }
 
+    @PreAuthorize("hasRole('ADMIN')")
     @PostMapping
     public Result<Map<String, Object>> create(@RequestBody Map<String, Object> body) {
         Object name = body.get("name");
         if (name == null || String.valueOf(name).isBlank()) return Result.fail(400, "仓库名称不能为空");
-        jdbc.update("INSERT INTO warehouse(name, location) VALUES (?,?)", String.valueOf(name), body.get("location"));
-        Long id = com.smartsupply.common.DbHelper.lastInsertIdByUnique(jdbc, "warehouse", "name", String.valueOf(name));
+        Long id = com.smartsupply.common.DbHelper.insertAndReturnId(jdbc,
+                "INSERT INTO warehouse(name, location) VALUES (?,?)", String.valueOf(name), body.get("location"));
         return Result.ok(Map.of("id", id == null ? 0 : id));
     }
 
+    @PreAuthorize("hasRole('ADMIN')")
     @PutMapping("/{id}")
     public Result<Void> update(@PathVariable long id, @RequestBody Map<String, Object> body) {
         int rows = jdbc.update("UPDATE warehouse SET name=?, location=? WHERE id=?", body.get("name"), body.get("location"), id);
@@ -45,6 +48,7 @@ public class WarehouseController {
         return Result.ok();
     }
 
+    @PreAuthorize("hasRole('ADMIN')")
     @DeleteMapping("/{id}")
     public Result<Void> delete(@PathVariable long id) {
         long cnt = jdbc.queryForObject("SELECT COUNT(*) FROM inventory WHERE warehouse_id=?", Long.class, id);

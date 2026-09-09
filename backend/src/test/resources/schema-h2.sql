@@ -275,3 +275,9 @@ CREATE TABLE IF NOT EXISTS eval_snapshot (
     created_at      TIMESTAMP NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_eval_snapshot_time ON eval_snapshot(created_at DESC);
+
+-- ========== V7 对齐：库存完整性约束 + 高频查询索引（与 V7__inventory_integrity_and_indexes.sql 保持一致） ==========
+UPDATE inventory SET quantity = 0 WHERE quantity < 0;
+ALTER TABLE inventory ADD CONSTRAINT chk_inventory_qty_nonneg CHECK (quantity >= 0);
+CREATE INDEX IF NOT EXISTS idx_chat_message_session ON chat_message(session_id);
+CREATE INDEX IF NOT EXISTS idx_po_item_order ON purchase_order_item(order_id);

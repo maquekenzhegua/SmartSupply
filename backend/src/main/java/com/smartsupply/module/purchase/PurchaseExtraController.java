@@ -3,6 +3,7 @@ package com.smartsupply.module.purchase;
 import com.smartsupply.common.CurrentUser;
 import com.smartsupply.common.Result;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 
@@ -38,6 +39,9 @@ public class PurchaseExtraController {
         } catch (Exception e) { return Result.fail(404, "采购单不存在"); }
     }
 
+    // 采购单创建/删除与状态流转统一 ADMIN（与 Agent 写工具 requireSupplierWritePerm 同一角色口径，
+    // 前端隐藏按钮不等于防线——直接 curl 也必须被 RBAC 拦下）
+    @PreAuthorize("hasRole('ADMIN')")
     @PostMapping
     @Transactional
     public Result<Map<String, Object>> create(@RequestBody Map<String, Object> body) {
@@ -54,9 +58,9 @@ public class PurchaseExtraController {
                 total += price * qty;
             }
         }
-        jdbc.update("INSERT INTO purchase_order(order_no, supplier_id, status, total_amount, remark) VALUES (?,?,?,?,?)",
+        Long orderId = com.smartsupply.common.DbHelper.insertAndReturnId(jdbc,
+                "INSERT INTO purchase_order(order_no, supplier_id, status, total_amount, remark) VALUES (?,?,?,?,?)",
                 orderNo, supplierId, "DRAFT", total, remark);
-        Long orderId = com.smartsupply.common.DbHelper.lastInsertIdByUnique(jdbc, "purchase_order", "order_no", orderNo);
         for (Object it : items) {
             if (it instanceof Map<?,?> m) {
                 Long skuId = Long.parseLong(String.valueOf(m.get("skuId")));
@@ -69,14 +73,12 @@ public class PurchaseExtraController {
         return Result.ok(Map.of("id", orderId == null ? 0 : orderId, "orderNo", orderNo));
     }
 
+    @PreAuthorize("hasRole('ADMIN')")
     @PutMapping("/{id}/status")
     @Transactional
     public Result<Map<String, Object>> updateStatus(@PathVariable long id, @RequestBody Map<String, Object> body) {
         String status = String.valueOf(body.get("status"));
         if (!List.of("DRAFT", "APPROVED", "RECEIVED", "CANCELLED").contains(status)) return Result.fail(400, "非法状态");
-        // 审批/收货/取消是运营决策动作：API 层强制 ADMIN（与 Agent 写工具 requireSupplierWritePerm 同一角色口径，
-        // 前端隐藏按钮不等于防线——直接 curl 也必须被 RBAC 拦下）
-        if (!CurrentUser.hasRole("ADMIN")) return Result.fail(403, "采购单状态流转需要 ADMIN 角色");
         String current;
         try {
             current = jdbc.queryForObject("SELECT status FROM purchase_order WHERE id=?", String.class, id);
@@ -124,6 +126,7 @@ public class PurchaseExtraController {
         }
     }
 
+    @PreAuthorize("hasRole('ADMIN')")
     @DeleteMapping("/{id}")
     public Result<Void> delete(@PathVariable long id) {
         // 业务约束：已生效（APPROVED/RECEIVED）的采购单不允许物理删除，只能走 CANCELLED
