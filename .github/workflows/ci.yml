@@ -89,9 +89,10 @@ jobs:
       - name: Frontend deps + Playwright
         working-directory: frontend
         run: |
-          # runner 预置的 google-chrome apt 源曾因上游索引瞬时哈希不匹配，连带 playwright --with-deps
-          # 的 apt 更新整体失败（首次真实 CI 实锤）；先移除该源再装依赖
-          sudo rm -f /etc/apt/sources.list.d/google-chrome.list
+          # runner 预置的 google-chrome apt 源在 Google CDN 侧持续返回与 Release 不一致的
+          # Packages.gz（两次 run 哈希逐字节相同，非瞬时抖动），连带 playwright --with-deps
+          # 的 apt 更新整体失败；按内容清除该源（兼容 .list 与 deb822 .sources 两种命名）
+          sudo grep -rl "dl.google.com" /etc/apt/sources.list.d/ | sudo xargs -r rm -f
           npm ci
           npx playwright install --with-deps chromium
       - name: E2E main flow
