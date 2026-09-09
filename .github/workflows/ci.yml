@@ -27,6 +27,18 @@ jobs:
   backend:
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    # ChatMemoryServiceTest / BusinessFlowTest 需要 localhost:6379 的 Redis（会话记忆、幂等键预清理）。
+    # 首次真实 CI 暴露：开发机常驻 dev Redis 而 runner 没有；其余套件确为离线（H2 + Testcontainers 真 PG）。
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -34,7 +46,7 @@ jobs:
           distribution: temurin
           java-version: '17'
           cache: maven
-      - name: "Backend test (full offline suite: H2 + Mock, no key/DB/Redis needed)"
+      - name: "Backend test (H2 + Mock + job 服务 Redis；真 PG 回归走 Testcontainers)"
         working-directory: backend
         run: mvn -B test
       # 真 PG 回归（Testcontainers，pgvector 镜像 + 真实 Flyway 迁移）：ubuntu runner 自带 Docker，
