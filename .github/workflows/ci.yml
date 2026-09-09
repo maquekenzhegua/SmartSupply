@@ -77,11 +77,14 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Infra (postgres + redis)
         run: docker compose up -d postgres redis
-      - name: Backend (AI_MOCK, datasource -> compose postgres)
+      - name: Backend (AI_MOCK 默认开, datasource -> compose postgres)
         working-directory: backend
         env:
           SPRING_DATASOURCE_USERNAME: dev
           SPRING_DATASOURCE_PASSWORD: change-me-strong-password
+          # Spring AI 的 OpenAI 适配器在启动期就要求非空 api-key（mock 模式也不例外，实跑踩坑）；
+          # e2e 走 java-direct 兜底路径，不需要真 key
+          OPENAI_API_KEY: dummy
         run: |
           mvn -B -q package -DskipTests
           nohup java -jar target/*.jar --server.port=8080 > backend-e2e.log 2>&1 &
@@ -151,24 +154,21 @@ jobs:
     permissions:
       contents: read
       packages: write
+    # prod base 的 :? 必填变量在 build 与全部 config 校验（含 obs/TLS overlay 的合并求值，
+    # 首次真实 CI 实锤 obs 校验同样会被 backend 的 JWT_SECRET 卡住）中都需要，job 级统一 stub；
+    # obs 专属密钥在该校验步骤内单独补
+    env:
+      POSTGRES_PASSWORD: ci-stub-password
+      JWT_SECRET: ci-stub-jwt-secret-0123456789abcdef0123456789abcdef
+      AI_MOCK: 'true'
     steps:
       - uses: actions/checkout@v4
-      # 多阶段 Dockerfile 直接从源码构建（无需预编译产物）；prod compose 的 :? 必填变量
-      # 在 build 时同样会被求值，必须与下方 config 校验步骤一致地给 stub
+      # 多阶段 Dockerfile 直接从源码构建（无需预编译产物）
       - run: docker compose -f docker-compose.prod.yml build
-        env:
-          POSTGRES_PASSWORD: ci-stub-password
-          JWT_SECRET: ci-stub-jwt-secret-0123456789abcdef0123456789abcdef
-          AI_MOCK: 'true'
-      - name: Validate prod compose config (with required secrets stubbed)
-        env:
-          POSTGRES_PASSWORD: ci-stub-password
-          JWT_SECRET: ci-stub-jwt-secret-0123456789abcdef0123456789abcdef
-          AI_MOCK: 'true'
+      - name: Validate prod compose config
         run: docker compose -f docker-compose.prod.yml config --quiet
       - name: Validate obs compose config (secrets stubbed)
         env:
-          POSTGRES_PASSWORD: ci-stub-password
           LANGFUSE_NEXTAUTH_SECRET: ci-stub-langfuse-nextauth-secret
           LANGFUSE_SALT: ci-stub-langfuse-salt
           GRAFANA_ADMIN_PASSWORD: ci-stub-grafana
@@ -285,6 +285,7 @@ jobs:
           SPRING_DATASOURCE_USERNAME: dev
           SPRING_DATASOURCE_PASSWORD: change-me-strong-password
           SMARTSUPPLY_RATELIMIT_ENABLED: 'false'
+          OPENAI_API_KEY: dummy   # 同 e2e:启动期必填,mock 不例外
         run: |
           mvn -B -q package -DskipTests
           nohup java -jar target/*.jar --server.port=8080 > backend-perf.log 2>&1 &
