@@ -2,6 +2,7 @@ package com.smartsupply.admin;
 
 import com.smartsupply.common.PageResult;
 import com.smartsupply.common.Result;
+import com.smartsupply.config.PromptRegistry;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
@@ -14,7 +15,12 @@ import java.util.*;
 public class AdminAgentController {
 
     private final JdbcTemplate jdbc;
-    public AdminAgentController(JdbcTemplate jdbc) { this.jdbc = jdbc; }
+    private final PromptRegistry promptRegistry;
+
+    public AdminAgentController(JdbcTemplate jdbc, PromptRegistry promptRegistry) {
+        this.jdbc = jdbc;
+        this.promptRegistry = promptRegistry;
+    }
 
     @GetMapping("/runs")
     public Result<PageResult<Map<String,Object>>> runs(
@@ -85,24 +91,31 @@ public class AdminAgentController {
         String agentType = body.getOrDefault("agentType","general");
         String content = body.get("content");
         if (content == null || content.isBlank()) return Result.fail(400, "content 不能为空");
-        String version = body.getOrDefault("version", "v" + System.currentTimeMillis());
+        String version = body.get("version");
         String user = com.smartsupply.common.CurrentUser.username();
-        // deactivate old
-        jdbc.update("UPDATE prompt_version SET active=false WHERE agent_type=?", agentType);
-        jdbc.update("INSERT INTO prompt_version(agent_type, version, content, active, created_by) VALUES (?,?,?,?,?)",
-                agentType, version, content, true, user);
+        // 经 PromptRegistry 发布：DB 落库 + 缓存失效，下一次对话立即生效（此前激活只改表、运行时不读，激活即摆设）
+        PromptRegistry.PromptVersion pv = promptRegistry.publish(agentType, version, content, user);
         Long id = jdbc.queryForObject("SELECT MAX(id) FROM prompt_version WHERE agent_type=?", Long.class, agentType);
-        return Result.ok(Map.of("id", id==null?0:id, "version", version));
+        return Result.ok(Map.of("id", id==null?0:id, "version", pv.version()));
     }
 
     @PostMapping("/prompts/{id}/activate")
     public Result<Void> activate(@PathVariable long id) {
-        List<Map<String,Object>> rows = jdbc.queryForList("SELECT agent_type FROM prompt_version WHERE id=?", id);
-        if (rows.isEmpty()) return Result.fail(404, "prompt not found");
-        String at = String.valueOf(rows.get(0).get("agent_type"));
-        jdbc.update("UPDATE prompt_version SET active=false WHERE agent_type=?", at);
-        jdbc.update("UPDATE prompt_version SET active=true WHERE id=?", id);
-        return Result.ok();
+        try {
+            promptRegistry.activate(id);
+            return Result.ok();
+        } catch (IllegalArgumentException e) {
+            return Result.fail(404, e.getMessage());
+        }
+    }
+
+    /** 生效提示词视图：每个 agent_type 当前真正注入对话的版本与来源（db=治理表生效 / builtin=内置默认），验证闭环用。 */
+    @GetMapping("/prompts/effective")
+    public Result<Map<String, Map<String, String>>> promptsEffective() {
+        Map<String, Map<String, String>> out = new LinkedHashMap<>();
+        promptRegistry.effectiveAll().forEach((type, pv) -> out.put(type, Map.of(
+                "version", pv.version(), "source", pv.source())));
+        return Result.ok(out);
     }
 
     @GetMapping("/eval")
@@ -111,5 +124,108 @@ public class AdminAgentController {
         List<Map<String,Object>> feedback = jdbc.queryForList("SELECT rating, COUNT(*) as cnt FROM user_feedback GROUP BY rating");
         Long totalRuns = jdbc.queryForObject("SELECT COUNT(*) FROM agent_run", Long.class);
         return Result.ok(Map.of("feedback", feedback, "totalRuns", totalRuns==null?0:totalRuns));
+    }
+
+    // ---- 在线评测闭环：低分反馈 → 评测候选 → 人工标注后进回归集 ----
+
+    /** 评测候选：负反馈（rating<=maxRating，默认踩=-1）关联运行台账与提问原文。
+     *  在线反馈此前只有 GROUP BY 计数展示，"驱动评测候选"只存在于文档——这里是闭环的第一环。 */
+    @GetMapping("/eval/candidates")
+    public Result<List<Map<String,Object>>> evalCandidates(
+            @RequestParam(defaultValue = "-1") int maxRating,
+            @RequestParam(defaultValue = "50") int limit) {
+        int cap = Math.min(Math.max(limit, 1), 200);
+        List<Map<String,Object>> rows = jdbc.queryForList(
+                "SELECT f.id AS \"id\", f.rating AS \"rating\", f.comment AS \"comment\", f.run_id AS \"runId\", " +
+                "       f.session_id AS \"sessionId\", f.message_id AS \"messageId\", f.created_at AS \"createdAt\", " +
+                "       r.agent_type AS \"agentType\", r.mode AS \"mode\", r.model AS \"model\", r.prompt_version AS \"promptVersion\" " +
+                "FROM user_feedback f LEFT JOIN agent_run r ON r.id=f.run_id " +
+                "WHERE f.rating <= ? ORDER BY f.id DESC LIMIT ?", maxRating, cap);
+        for (Map<String,Object> row : rows) enrichWithConversation(row);
+        return Result.ok(rows);
+    }
+
+    /** 候选导出（golden JSONL，NDJSON）：人工补 ground_truth 后并入 golden_rag.jsonl 即完成回流。
+     *  ground_truth 留空——机器绝不代填"正确答案"，这是评测集真实性的底线。 */
+    @GetMapping("/eval/candidates/export")
+    public org.springframework.http.ResponseEntity<String> exportCandidates(
+            @RequestParam(defaultValue = "-1") int maxRating,
+            @RequestParam(defaultValue = "100") int limit) {
+        int cap = Math.min(Math.max(limit, 1), 500);
+        List<Map<String,Object>> rows = jdbc.queryForList(
+                "SELECT f.rating AS \"rating\", f.comment AS \"comment\", f.message_id AS \"messageId\" " +
+                "FROM user_feedback f WHERE f.rating <= ? ORDER BY f.id DESC LIMIT ?", maxRating, cap);
+        com.fasterxml.jackson.databind.ObjectMapper om = new com.fasterxml.jackson.databind.ObjectMapper();
+        StringBuilder ndjson = new StringBuilder();
+        for (Map<String,Object> row : rows) {
+            enrichWithConversation(row);
+            Map<String,Object> line = new LinkedHashMap<>();
+            line.put("question", row.getOrDefault("question", ""));
+            line.put("ground_truth", "");
+            line.put("contexts", List.of());
+            line.put("layer", "online");
+            line.put("feedback_rating", row.get("rating"));
+            line.put("comment", row.get("comment"));
+            try {
+                ndjson.append(om.writeValueAsString(line)).append("\n");
+            } catch (Exception ignored) {}
+        }
+        return org.springframework.http.ResponseEntity.ok()
+                .header("Content-Disposition", "attachment; filename=eval-candidates.jsonl")
+                .body(ndjson.toString());
+    }
+
+    /** 补齐候选的对话原文：被评分消息 + 同会话中它之前最近一条用户提问。 */
+    private void enrichWithConversation(Map<String,Object> row) {
+        Object mid = row.get("messageId");
+        if (!(mid instanceof Number n)) return;
+        try {
+            List<Map<String,Object>> rated = jdbc.queryForList(
+                    "SELECT session_id AS \"sid\", role AS \"role\", content AS \"content\" FROM chat_message WHERE id=?", n.longValue());
+            if (rated.isEmpty()) return;
+            Object sid = rated.get(0).get("sid");
+            row.put("ratedRole", rated.get(0).get("role"));
+            row.put("ratedContent", rated.get(0).get("content"));
+            if (sid == null) return;
+            List<Map<String,Object>> q = jdbc.queryForList(
+                    "SELECT content AS \"content\" FROM chat_message WHERE session_id=? AND role='user' AND id<=? ORDER BY id DESC LIMIT 1",
+                    ((Number) sid).longValue(), n.longValue());
+            if (!q.isEmpty()) row.put("question", q.get(0).get("content"));
+        } catch (Exception ignored) {}
+    }
+
+    // ---- 评测快照：离线指标随时间留痕（趋势半边） ----
+
+    @PostMapping("/eval/snapshots")
+    public Result<Map<String,Object>> addSnapshot(@RequestBody Map<String,Object> body) {
+        String source = String.valueOf(body.getOrDefault("source", "manual"));
+        String reportFile = body.get("reportFile") == null ? null : String.valueOf(body.get("reportFile"));
+        Object metrics = body.get("metrics");
+        String metricsJson;
+        try {
+            metricsJson = metrics == null ? "{}" : new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(metrics);
+        } catch (Exception e) { metricsJson = "{}"; }
+        String user = com.smartsupply.common.CurrentUser.username();
+        jdbc.update("INSERT INTO eval_snapshot(source, report_file, metrics, created_by) VALUES (?,?,?,?)",
+                source, reportFile, metricsJson, user);
+        Long id = jdbc.queryForObject("SELECT MAX(id) FROM eval_snapshot", Long.class);
+        return Result.ok(Map.of("id", id == null ? 0 : id));
+    }
+
+    @GetMapping("/eval/snapshots")
+    public Result<List<Map<String,Object>>> snapshots(@RequestParam(defaultValue = "50") int limit) {
+        int cap = Math.min(Math.max(limit, 1), 200);
+        List<Map<String,Object>> rows = jdbc.queryForList(
+                "SELECT id AS \"id\", source AS \"source\", report_file AS \"reportFile\", metrics AS \"metrics\", " +
+                "       created_by AS \"createdBy\", created_at AS \"createdAt\" " +
+                "FROM eval_snapshot ORDER BY id DESC LIMIT ?", cap);
+        com.fasterxml.jackson.databind.ObjectMapper om = new com.fasterxml.jackson.databind.ObjectMapper();
+        for (Map<String,Object> row : rows) {
+            Object m = row.get("metrics");
+            if (m instanceof String s && !s.isBlank()) {
+                try { row.put("metrics", om.readValue(s, Map.class)); } catch (Exception ignored) {}
+            }
+        }
+        return Result.ok(rows);
     }
 }

@@ -1,8 +1,14 @@
 -- SmartSupply init.sql — PostgreSQL + pgvector
--- 兼容：若无 pgvector 扩展，向量表退化为普通表，RAG 用内存检索 Demo
+-- 兼容：若无 pgvector 扩展，向量表退化为普通表（不建 embedding 列，RAG 用内存检索 Demo）
 
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
-CREATE EXTENSION IF NOT EXISTS vector;
+-- 扩展缺失时不可让迁移失败：捕获并降级（本机开发环境可能未装 pgvector）
+DO $$
+BEGIN
+    CREATE EXTENSION IF NOT EXISTS vector;
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'pgvector 扩展不可用，knowledge_chunk 将按普通表降级创建';
+END $$;
 
 -- ========== 基础 ==========
 CREATE TABLE IF NOT EXISTS sys_user (
@@ -124,15 +130,29 @@ CREATE TABLE IF NOT EXISTS knowledge_doc (
 );
 
 -- pgvector 向量表（默认 1024 维适配本地 Ollama qwen3-embedding:0.6b / bge-m3；换 OpenAI text-embedding-3-small 时改 1536）
-CREATE TABLE IF NOT EXISTS knowledge_chunk (
-    id              BIGSERIAL PRIMARY KEY,
-    doc_id          BIGINT       REFERENCES knowledge_doc(id) ON DELETE CASCADE,
-    chunk_index     INTEGER      NOT NULL DEFAULT 0,
-    content         TEXT         NOT NULL,
-    embedding       vector(1024),
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS idx_knowledge_chunk_embedding ON knowledge_chunk USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+-- 有 pgvector 时带 embedding 列与 ivfflat 索引；无扩展时降级为普通表（embedding 列由 Spring AI 的 vector_store 承担）
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') THEN
+        CREATE TABLE IF NOT EXISTS knowledge_chunk (
+            id              BIGSERIAL PRIMARY KEY,
+            doc_id          BIGINT       REFERENCES knowledge_doc(id) ON DELETE CASCADE,
+            chunk_index     INTEGER      NOT NULL DEFAULT 0,
+            content         TEXT         NOT NULL,
+            embedding       vector(1024),
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        CREATE INDEX IF NOT EXISTS idx_knowledge_chunk_embedding ON knowledge_chunk USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+    ELSE
+        CREATE TABLE IF NOT EXISTS knowledge_chunk (
+            id              BIGSERIAL PRIMARY KEY,
+            doc_id          BIGINT       REFERENCES knowledge_doc(id) ON DELETE CASCADE,
+            chunk_index     INTEGER      NOT NULL DEFAULT 0,
+            content         TEXT         NOT NULL,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS chat_session (
     id              BIGSERIAL PRIMARY KEY,

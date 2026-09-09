@@ -15,12 +15,15 @@ public class TokenEstimator {
     private final Encoding enc;
     private final double promptPer1k;
     private final double completionPer1k;
+    private final com.smartsupply.agent.cost.ModelPricingTable pricing;
 
     public TokenEstimator(
             @Value("${smartsupply.ai.pricing.prompt-per-1k:0.0015}") double promptPer1k,
-            @Value("${smartsupply.ai.pricing.completion-per-1k:0.002}") double completionPer1k) {
+            @Value("${smartsupply.ai.pricing.completion-per-1k:0.002}") double completionPer1k,
+            com.smartsupply.agent.cost.ModelPricingTable pricing) {
         this.promptPer1k = promptPer1k;
         this.completionPer1k = completionPer1k;
+        this.pricing = pricing;
         Encoding resolved = null;
         try {
             EncodingRegistry reg = Encodings.newDefaultEncodingRegistry();
@@ -45,5 +48,13 @@ public class TokenEstimator {
 
     public double estimateCostUsd(int promptTokens, int completionTokens) {
         return promptTokens / 1000.0 * promptPer1k + completionTokens / 1000.0 * completionPer1k;
+    }
+
+    /** 按模型查价计成本（多模型路由下必须按模型计价，单一全局价会失真）；模型未配价回退全局单价。 */
+    public double estimateCostUsd(String model, int promptTokens, int completionTokens) {
+        if (pricing != null && model != null && !model.isBlank()) {
+            return pricing.costUsd(model, promptTokens, completionTokens);
+        }
+        return estimateCostUsd(promptTokens, completionTokens);
     }
 }

@@ -48,7 +48,10 @@ public class AgentController {
     private final PromptGuard guard;
     private final TokenEstimator tokenEstimator;
     private final org.springframework.jdbc.core.JdbcTemplate jdbc;
+    private final com.smartsupply.agent.cost.AgentBudgetService budget;
+    private final AgentTypeResolver resolver;
     private final boolean chatMock;
+    private final String aiModelName;
     private final boolean embeddingMock;
     private final ExecutorService sseExecutor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "agent-sse");
@@ -63,7 +66,9 @@ public class AgentController {
                            com.smartsupply.agent.tools.CatalogTools catalogTools,
                            PythonSidecarService pythonSidecar, PromptRegistry prompts, ObservationService observation,
                            PromptGuard guard, TokenEstimator tokenEstimator, org.springframework.jdbc.core.JdbcTemplate jdbc,
+                           com.smartsupply.agent.cost.AgentBudgetService budget, AgentTypeResolver resolver,
                            @org.springframework.beans.factory.annotation.Value("${smartsupply.ai.mock:true}") boolean chatMock,
+                           @org.springframework.beans.factory.annotation.Value("${spring.ai.openai.chat.options.model:gpt-4o-mini}") String aiModelName,
                            @org.springframework.beans.factory.annotation.Value("${smartsupply.ai.embedding-mock:false}") boolean embeddingMock) {
         this.chatClient = chatClient;
         this.ragService = ragService;
@@ -78,7 +83,10 @@ public class AgentController {
         this.guard = guard;
         this.tokenEstimator = tokenEstimator;
         this.jdbc = jdbc;
+        this.budget = budget;
+        this.resolver = resolver;
         this.chatMock = chatMock;
+        this.aiModelName = aiModelName;
         this.embeddingMock = embeddingMock;
     }
 
@@ -90,7 +98,7 @@ public class AgentController {
         String rawMessage = body.getOrDefault("message", "");
         String message = guard.sanitizeUserInput(rawMessage);
         boolean flagged = guard.containsInjection(rawMessage);
-        String agentType = body.getOrDefault("agentType", "general");
+        String clientType = body.getOrDefault("agentType", "general");
         final String user = com.smartsupply.common.CurrentUser.username();
         String rawSessionId = body.getOrDefault("sessionId", "default-" + user);
         // "default" 归一化为按用户隔离的缺省会话；final 以便后续 lambda 捕获
@@ -98,12 +106,20 @@ public class AgentController {
         if (!memory.canAccess(sessionId, user)) {
             return Result.fail(403, "无权访问该会话");
         }
+        // 成本闸门：日预算超限直接拒绝（先于任何 LLM/工具调用），不降级不伪装——花不起就是花不起
+        var budgetStatus = budget.check(user);
+        if (budgetStatus.over()) {
+            return Result.fail(429, "今日 Agent 成本预算已用尽（" + budgetStatus.describe() + "）。请联系管理员调整限额或明日再试。");
+        }
+        // agent_type 服务端裁决：deep 是运行模式不是人设，人设按消息内容归类，归类结果进台账
+        AgentTypeResolver.Resolved resolvedType = resolver.resolve("deep".equals(clientType) ? "auto" : clientType, message);
+        String agentType = resolvedType.agentType();
         boolean requireConfirm = "true".equalsIgnoreCase(body.getOrDefault("confirmCreate", "false"));
         final String resumeThreadId = String.valueOf(body.getOrDefault("threadId", "")).trim();
         final boolean isResume = "true".equalsIgnoreCase(body.getOrDefault("resume", "false")) && !resumeThreadId.isBlank();
         final boolean confirmApproved = "true".equalsIgnoreCase(body.getOrDefault("confirmApprove", "false"));
-        boolean deepGateActive = ("deep".equals(agentType) || "true".equalsIgnoreCase(body.getOrDefault("useDeep", "false")))
-                && pythonSidecar.isEnabled();
+        boolean useDeep0 = "deep".equals(clientType) || "true".equalsIgnoreCase(body.getOrDefault("useDeep", "false"));
+        boolean deepGateActive = useDeep0 && pythonSidecar.isEnabled();
         if (message.isBlank() && !isResume) return Result.fail(400, "message 不能为空");
         // 写意图闸门（java-direct 兜底）：深度模式跳过，图内 interrupt() 是更可靠的 HITL（见 stream 同注）
         if (isWriteIntent(message) && !requireConfirm && !isResume && !deepGateActive) {
@@ -116,7 +132,7 @@ public class AgentController {
         if (traceId == null) traceId = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 16);
         String ragContext = "";
         RagService.RecallDetail detail = null;
-        if ("contract".equals(agentType) || message.contains("合同") || message.contains("风控") || message.contains("风险")) {
+        if (shouldRecall(agentType, message)) {
             detail = ragService.recallWithDetail(message);
             ragContext = detail.context();
         }
@@ -124,9 +140,10 @@ public class AgentController {
         String userContent = guard.wrapUserContent(message, ragContext);
         // persistent run
         Long uid = null; try { uid = jdbc.queryForObject("SELECT id FROM sys_user WHERE username=?", Long.class, user); } catch (Exception ignored) {}
-        String modelName = prompts.versionFor(agentType);
-        long runId = observation.insertRun(traceId, user, uid, sessionId, agentType, "java-direct", modelName);
-        boolean useDeep = "deep".equals(agentType) || "true".equalsIgnoreCase(body.getOrDefault("useDeep", "false"));
+        // 台账口径修正：model 列记录真实对话模型（此前错存 prompt 版本），prompt_version 独立归因
+        String runModel = chatMock ? "mock" : aiModelName;
+        long runId = observation.insertRun(traceId, user, uid, sessionId, agentType, "java-direct", runModel, promptVersion);
+        boolean useDeep = useDeep0;
         if (useDeep && pythonSidecar.isEnabled()) {
             List<Map<String, String>> msgs = new ArrayList<>();
             if (isResume) {
@@ -162,13 +179,11 @@ public class AgentController {
                 String deepReply = sr.reply();
                 if (!isResume) memory.append(sessionId, "user", message, user);
                 memory.append(sessionId, "assistant", deepReply, user);
-                PythonSidecarService.TokenUsage su = sr.usage();
-                int promptTokens = su != null && su.promptTokens() > 0
-                        ? su.promptTokens() : tokenEstimator.estimate(systemPrompt + userContent + history.size() * 50);
-                int completionTokens = su != null && su.completionTokens() > 0
-                        ? su.completionTokens() : tokenEstimator.estimate(deepReply);
-                String tokenSource = su != null && "actual".equals(su.source()) ? "actual" : "estimated";
-                double cost = tokenEstimator.estimateCostUsd(promptTokens, completionTokens);
+                DeepUsage du = deepUsage(sr, tokenEstimator.estimate(systemPrompt + userContent) + estimateHistoryTokens(history), tokenEstimator.estimate(deepReply));
+                int promptTokens = du.promptTokens();
+                int completionTokens = du.completionTokens();
+                String tokenSource = du.actual() ? "actual" : "estimated";
+                double cost = du.costUsd();
                 long lat = System.currentTimeMillis() - start;
                 // degraded 深度响应不得记为 SUCCESS：LLM/工具故障下的降级产物计入成功会污染台账与评测
                 String deepStatus = sr.degraded() ? "DEGRADED" : "SUCCESS";
@@ -178,23 +193,10 @@ public class AgentController {
                     observation.updateRunMode(runId, sr.degraded() ? "python-deep-degraded" : "python-deep");
                     observation.completeRun(runId, deepStatus, lat, null, promptTokens, completionTokens, cost, tokenSource,
                             sr.degraded() ? sr.degradeReason() : null);
+                    budget.addCost(user, cost);
                     observation.insertStep(runId, 1, "llm", "python-sidecar", sha(systemPrompt), sha(deepReply), System.currentTimeMillis() - sidecarStart, !sr.degraded());
-                    int seq = 2;
-                    for (Map<String, Object> tr : sr.trace()) {
-                        // Python trace 条目按节点类型分别用 tool/calls 字段命名，name 兜底
-                        Object stepName = tr.getOrDefault("tool", tr.getOrDefault("provider", tr.getOrDefault("name", "")));
-                        observation.insertStep(runId, seq++, String.valueOf(tr.getOrDefault("node", "step")), String.valueOf(stepName), null, null, 0, true);
-                    }
-                    for (Map<String, Object> tcr : sr.toolResults()) {
-                        Object args = tcr.get("args");
-                        String argsJson;
-                        try { argsJson = args == null ? "{}" : new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(args); }
-                        catch (Exception e) { argsJson = String.valueOf(args); }
-                        boolean toolOk = !Boolean.FALSE.equals(tcr.get("ok"));
-                        observation.insertToolCall(runId, null, String.valueOf(tcr.getOrDefault("tool", "tool")), argsJson,
-                                sha(String.valueOf(tcr.get("result"))), toolOk, 0,
-                                CurrentUser.roles().isEmpty() ? "" : CurrentUser.roles().get(0));
-                    }
+                    insertPythonTraceSteps(runId, sr.trace(), 2);
+                    insertPythonToolCalls(runId, sr.toolResults(), new com.fasterxml.jackson.databind.ObjectMapper(), firstRole());
                 }
                 if (detail != null) observation.recordRag(detail.latencyMs(), detail.reranked());
                 Map<String, Object> deepData = new java.util.HashMap<>();
@@ -207,6 +209,7 @@ public class AgentController {
                 deepData.put("traceId", traceId);
                 deepData.put("flagged", flagged);
                 deepData.put("tokenSource", tokenSource);
+                deepData.put("agentTypeSource", resolvedType.source());
                 deepData.put("runId", runId);
                 deepData.put("degraded", sr.degraded());
                 if (sr.degraded()) deepData.put("degradeReason", sr.degradeReason());
@@ -223,6 +226,7 @@ public class AgentController {
         String reply;
         List<String> usedTools;
         long llmStart = System.currentTimeMillis();
+        Map<String, Object> citationFlags = new java.util.HashMap<>();
         try {
             reply = spec.user(userContent)
                     .tools(inventoryTools, purchaseTools, contractTools, catalogTools)
@@ -230,12 +234,12 @@ public class AgentController {
         } finally {
             usedTools = com.smartsupply.agent.tools.ToolSecurity.endToolTrace();
         }
-        reply = enforceCitation(reply, ragContext, citationTitles(detail));
+        reply = enforceCitation(reply, ragContext, citationTitles(detail), citationFlags);
         memory.append(sessionId, "user", message, user);
         // persist tool calls json
         try {
             if (!usedTools.isEmpty()) {
-                Long sid = jdbc.queryForObject("SELECT id FROM chat_session WHERE title=? ORDER BY id DESC LIMIT 1", Long.class, sessionId);
+                Long sid = memory.findSessionDbId(sessionId);
                 if (sid != null) {
                     String toolJson = new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(usedTools);
                     // UPDATE ... ORDER BY ... LIMIT 是 MySQL 方言，H2(PG模式)/PG 会报语法错。
@@ -252,11 +256,11 @@ public class AgentController {
         int completionTokens;
         String tokenSource;
         if (usage != null) {
-            promptTokens = usage.promptTokens() > 0 ? usage.promptTokens() : tokenEstimator.estimate(systemPrompt + userContent + history.size() * 50);
+            promptTokens = usage.promptTokens() > 0 ? usage.promptTokens() : tokenEstimator.estimate(systemPrompt + userContent) + estimateHistoryTokens(history);
             completionTokens = usage.completionTokens() > 0 ? usage.completionTokens() : tokenEstimator.estimate(reply == null ? "" : reply);
             tokenSource = usage.source();
         } else {
-            promptTokens = tokenEstimator.estimate(systemPrompt + userContent + history.size() * 50);
+            promptTokens = tokenEstimator.estimate(systemPrompt + userContent) + estimateHistoryTokens(history);
             completionTokens = tokenEstimator.estimate(reply == null ? "" : reply);
             tokenSource = "estimated";
         }
@@ -265,22 +269,13 @@ public class AgentController {
         observation.recordChat(agentType, "java-direct", latency, promptTokens, completionTokens, cost, traceId, tokenSource);
         if (runId > 0) {
             observation.completeRun(runId, "SUCCESS", latency, null, promptTokens, completionTokens, cost, tokenSource, null);
+            budget.addCost(user, cost);
             observation.insertStep(runId, 1, "llm", "java-direct", sha(systemPrompt + userContent), sha(reply), System.currentTimeMillis() - llmStart, true);
             for (String tname : usedTools) {
                 observation.insertToolCall(runId, null, tname, "{}", sha(tname), true, 0, CurrentUser.roles().isEmpty() ? "" : CurrentUser.roles().get(0));
             }
         }
         if (detail != null) observation.recordRag(detail.latencyMs(), detail.reranked());
-        // enforce [n] citation if rag present but reply lacks it
-        if (detail != null && detail.citations() != null && !detail.citations().isEmpty() && reply != null && !reply.contains("[")) {
-            StringBuilder cb = new StringBuilder(reply);
-            cb.append("\n\n");
-            for (int ci=0; ci<detail.citations().size() && ci<3; ci++) {
-                var c = detail.citations().get(ci);
-                cb.append("[").append(ci+1).append("] ").append(c.title()).append(" | ").append(c.snippet()).append("\n");
-            }
-            reply = cb.toString();
-        }
         Map<String, Object> data = new java.util.HashMap<>();
         data.put("reply", reply == null ? "" : reply);
         data.put("agentType", agentType);
@@ -294,6 +289,7 @@ public class AgentController {
         data.put("completionTokens", completionTokens);
         data.put("tools", usedTools);
         data.put("runId", runId);
+        data.putAll(citationFlags);
         if (detail != null && detail.citations() != null) {
             var citList = new java.util.ArrayList<Map<String,Object>>();
             for (int ci=0; ci<detail.citations().size(); ci++) { var c=detail.citations().get(ci); citList.add(Map.of("idx", ci+1, "docId", c.docId(), "title", c.title(), "snippet", c.snippet(), "score", c.score())); }
@@ -320,8 +316,6 @@ public class AgentController {
         // 在请求线程解析并校验（SSE 线程池无 SecurityContext，username/sessionId 必须在进入线程前定妥）
         String raw = body.getOrDefault("message", "");
         String message = guard.sanitizeUserInput(raw);
-        String agentType = agentType0;
-        boolean useDeep = useDeep0;
         final String streamUser = com.smartsupply.common.CurrentUser.username();
         String rawSessionId = body.getOrDefault("sessionId", "default-" + streamUser);
         // final：SSE 线程池 lambda 捕获；"default" 归一化为按用户隔离的缺省会话
@@ -333,6 +327,16 @@ public class AgentController {
             } catch (Exception ignored) {}
             return emitterResponse;
         }
+        // 成本闸门（与 /chat 同口径）：超预算先拒绝，不产生任何 LLM/工具开销
+        var budgetStatus = budget.check(streamUser);
+        if (budgetStatus.over()) {
+            final String budgetErr = budgetErrorJson(budgetStatus);
+            sseExecutor.execute(() -> {
+                try { emitter.send(SseEmitter.event().data(budgetErr).name("error")); emitter.complete(); }
+                catch (Exception ignored) {}
+            });
+            return emitterResponse;
+        }
         // 写意图闸门（java-direct 层兜底）：深度模式跳过——LangGraph 图内写工具执行前经
         // interrupt() 挂起等人工批准，HITL 决策基于模型真实工具调用而非消息措辞，更可靠；
         // resume 请求（批准/拒绝回调）同样不重复过闸门。
@@ -340,6 +344,10 @@ public class AgentController {
         final String resumeThreadId = String.valueOf(body.getOrDefault("threadId", "")).trim();
         final boolean isResume = "true".equalsIgnoreCase(body.getOrDefault("resume", "false")) && !resumeThreadId.isBlank();
         final boolean confirmApproved = "true".equalsIgnoreCase(body.getOrDefault("confirmApprove", "false"));
+        // agent_type 服务端裁决（deep 是模式不是人设，人设按消息归类），归类结果进台账与 done 事件
+        AgentTypeResolver.Resolved resolvedType = resolver.resolve(useDeep0 ? "auto" : agentType0, message);
+        String agentType = resolvedType.agentType();
+        boolean useDeep = useDeep0;
         if (isWriteIntent(message) && !requireConfirm && !isResume
                 && !(useDeep && pythonSidecar.isEnabled())) {
             // 闸门事件也走异步线程发送：请求线程上同步 send+complete 的 SSE 字节在反代
@@ -368,8 +376,8 @@ public class AgentController {
             try {
                 MDC.put(TraceIdFilter.TRACE_ID, capturedTrace == null ? "stream" : capturedTrace);
                 String systemPrompt = prompts.contentFor(agentType);
-                // 单次赋值保持 effectively-final，供流式回调 lambda 捕获
-                RagService.RecallDetail streamDetail = ("contract".equals(agentType) || message.contains("合同"))
+                // 单次赋值保持 effectively-final，供流式回调 lambda 捕获；RAG 触发与 /chat 同口径
+                RagService.RecallDetail streamDetail = shouldRecall(agentType, message)
                         ? ragService.recallWithDetail(message) : null;
                 final RagService.RecallDetail finalStreamDetail = streamDetail;
                 String ragContext = finalStreamDetail == null ? "" : finalStreamDetail.context();
@@ -395,7 +403,8 @@ public class AgentController {
                     String deepTraceId = capturedTrace == null ? "" : capturedTrace;
                     Long uid = null;
                     try { uid = jdbc.queryForObject("SELECT id FROM sys_user WHERE username=?", Long.class, streamUser); } catch (Exception ignored) {}
-                    long deepRunId = observation.insertRun(deepTraceId, streamUser, uid, sessionId, agentType, "python-deep", prompts.versionFor(agentType));
+                    long deepRunId = observation.insertRun(deepTraceId, streamUser, uid, sessionId, agentType, "python-deep",
+                            chatMock ? "mock" : aiModelName, prompts.versionFor(agentType));
                     final long runIdFinal = deepRunId;
                     com.fasterxml.jackson.databind.ObjectMapper om = new com.fasterxml.jackson.databind.ObjectMapper();
                     Map<String, Object> resumePayload = isResume ? Map.of("approved", confirmApproved) : null;
@@ -445,31 +454,23 @@ public class AgentController {
                         if (!isResume) memory.append(sessionId, "user", message, streamUser);
                         memory.append(sessionId, "assistant", deepReply, streamUser);
                         long lat = System.currentTimeMillis() - streamStart;
-                        PythonSidecarService.TokenUsage su = sr.usage();
-                        int pT = su != null && su.promptTokens() > 0 ? su.promptTokens() : tokenEstimator.estimate(systemPrompt + finalUserContent + history.size() * 50);
-                        int cT = su != null && su.completionTokens() > 0 ? su.completionTokens() : tokenEstimator.estimate(deepReply);
-                        String tSrc = su != null && su.source() != null && su.source().equals("actual") ? "actual" : "estimated";
+                        DeepUsage du = deepUsage(sr, tokenEstimator.estimate(systemPrompt + finalUserContent) + estimateHistoryTokens(history), tokenEstimator.estimate(deepReply));
+                        int pT = du.promptTokens();
+                        int cT = du.completionTokens();
+                        String tSrc = du.actual() ? "actual" : "estimated";
+                        double deepCost = du.costUsd();
                         observation.recordChat(agentType, sr.degraded() ? "python-deep-degraded" : "python-deep",
-                                lat, pT, cT, tokenEstimator.estimateCostUsd(pT, cT), deepTraceId, tSrc);
+                                lat, pT, cT, deepCost, deepTraceId, tSrc);
                         if (runIdFinal > 0) {
                             observation.updateRunMode(runIdFinal, sr.degraded() ? "python-deep-degraded" : "python-deep");
                             observation.completeRun(runIdFinal, sr.degraded() ? "DEGRADED" : "SUCCESS", lat, null, pT, cT,
-                                    tokenEstimator.estimateCostUsd(pT, cT), tSrc, sr.degraded() ? sr.degradeReason() : null);
-                            int seq = 1;
-                            for (Map<String, Object> tr : sr.trace()) {
-                                Object stepName = tr.getOrDefault("tool", tr.getOrDefault("provider", tr.getOrDefault("name", "")));
-                                observation.insertStep(runIdFinal, seq++, String.valueOf(tr.getOrDefault("node", "step")),
-                                        String.valueOf(stepName), null, null, 0, true);
-                            }
-                            for (Map<String, Object> tcr : sr.toolResults()) {
-                                Object args = tcr.get("args");
-                                String argsJson;
-                                try { argsJson = args == null ? "{}" : om.writeValueAsString(args); }
-                                catch (Exception e) { argsJson = String.valueOf(args); }
-                                observation.insertToolCall(runIdFinal, null, String.valueOf(tcr.getOrDefault("tool", "")),
-                                        argsJson, sha(String.valueOf(tcr)), !Boolean.FALSE.equals(tcr.get("ok")), 0,
-                                        streamUser);
-                            }
+                                    deepCost, tSrc, sr.degraded() ? sr.degradeReason() : null);
+                            budget.addCost(streamUser, deepCost);
+                            // 与 /chat 深度分支同口径：seq=1 为 llm 步骤，trace 从 2 起；成败位如实（provider 故障≠成功）
+                            observation.insertStep(runIdFinal, 1, "llm", "python-sidecar", sha(systemPrompt), sha(deepReply),
+                                    System.currentTimeMillis() - streamStart, !sr.degraded());
+                            insertPythonTraceSteps(runIdFinal, sr.trace(), 2);
+                            insertPythonToolCalls(runIdFinal, sr.toolResults(), om, firstRole());
                         }
                         List<String> tools = new ArrayList<>();
                         for (Map<String, Object> t : sr.toolResults()) tools.add(String.valueOf(t.getOrDefault("tool", "")));
@@ -518,14 +519,14 @@ public class AgentController {
                             err -> emitter.completeWithError(err),
                             () -> {
                                 try {
-                                    String reply = enforceCitation(acc.toString(), finalRagContext, citationTitles(finalStreamDetail));
+                                    String reply = enforceCitation(acc.toString(), finalRagContext, citationTitles(finalStreamDetail), null);
                                     if (reply.isBlank()) {
                                         String fallback = chatClient.prompt().system(systemPrompt)
                                                 .user(finalUserContent).tools(inventoryTools, purchaseTools, contractTools, catalogTools)
                                                 .call().content();
-                                        fallback = enforceCitation(fallback == null ? "" : fallback, finalRagContext, citationTitles(finalStreamDetail));
+                                        fallback = enforceCitation(fallback == null ? "" : fallback, finalRagContext, citationTitles(finalStreamDetail), null);
                                         reply = fallback;
-                                        for (String ch : reply.split("")) emitter.send(SseEmitter.event().data(String.valueOf(ch)).name("token"));
+                                        sendTokenized(emitter, reply, 64);
                                     }
                                     memory.append(sessionId, "user", message, streamUser);
                                     memory.append(sessionId, "assistant", reply, streamUser);
@@ -534,7 +535,7 @@ public class AgentController {
                                     // 并发下会把 A 请求的 token 记到 B 请求头上
                                     TokenContext.Usage usage2 = MuseSparkChatModel.consumeUsage();
                                     int pTokens = usage2 != null && usage2.promptTokens() > 0
-                                            ? usage2.promptTokens() : tokenEstimator.estimate(systemPrompt + finalUserContent + history.size() * 50);
+                                            ? usage2.promptTokens() : tokenEstimator.estimate(systemPrompt + finalUserContent) + estimateHistoryTokens(history);
                                     int cTokens = usage2 != null && usage2.completionTokens() > 0
                                             ? usage2.completionTokens() : tokenEstimator.estimate(reply);
                                     String srcFinal = usage2 != null && "actual".equals(usage2.source()) ? "actual" : "estimated";
@@ -552,11 +553,11 @@ public class AgentController {
                     );
                     return;
                 } catch (Exception ex) {
-                    String reply = enforceCitation(spec.user(finalUserContent).tools(inventoryTools, purchaseTools, contractTools, catalogTools).call().content(), finalRagContext, citationTitles(finalStreamDetail));
+                    String reply = enforceCitation(spec.user(finalUserContent).tools(inventoryTools, purchaseTools, contractTools, catalogTools).call().content(), finalRagContext, citationTitles(finalStreamDetail), null);
                     String text = reply == null ? "" : reply;
                     memory.append(sessionId, "user", message, streamUser);
                     memory.append(sessionId, "assistant", text, streamUser);
-                    for (String ch : text.split("")) { emitter.send(SseEmitter.event().data(String.valueOf(ch)).name("token")); }
+                    sendTokenized(emitter, text, 64);
                     long totalMs = System.currentTimeMillis() - streamStart;
                     observation.recordChat(agentType, "stream-fallback", totalMs, tokenEstimator.estimate(systemPrompt + finalUserContent), tokenEstimator.estimate(text), tokenEstimator.estimateCostUsd(tokenEstimator.estimate(text), tokenEstimator.estimate(text)), capturedTrace == null ? "stream" : capturedTrace, "estimated");
                     emitter.send(SseEmitter.event().data("[DONE]").name("done"));
@@ -687,22 +688,115 @@ public class AgentController {
     }
 
     /**
-     * 引用兜底只列"本轮真实召回的来源文档标题"，供用户核对，不把上下文片段伪装成依据：
-     * 此前把召回上下文前 120 字硬拼成 "[引用]" 块，是无 grounding 的伪造引用，已移除。
+     * 引用兜底：回答没有引用且本轮有召回时，列出"检索候选来源"供人工核对。
+     * 诚实性边界：这些标题只是检索命中，不代表模型作答真正采用了它们——文案必须写明
+     * "未必被采用"，并以 citationMissing 标志暴露给前端/台账（此前把召回片段伪装成回答依据，已移除）。
      */
-    private String enforceCitation(String reply, String ragContext, List<String> citationTitles) {
+    private String enforceCitation(String reply, String ragContext, List<String> citationTitles, Map<String, Object> dataOut) {
         if (reply == null || reply.isBlank()) return reply == null ? "" : reply;
         if (ragContext == null || ragContext.isBlank()) return reply;
-        if (reply.contains("[引用]") || reply.contains("依据不足")) return reply;
+        if (reply.contains("[引用]") || reply.contains("[候选引用]") || reply.contains("依据不足")) return reply;
         if (citationTitles == null || citationTitles.isEmpty()) return reply;
-        StringBuilder sb = new StringBuilder(reply).append("\n\n[引用] 本轮召回的知识来源（供核对，详见响应 citations 字段）：");
+        StringBuilder sb = new StringBuilder(reply).append("\n\n[候选引用] 本轮检索命中的来源（仅供人工核对，不代表本回答已逐条采用；结构化来源见响应 citations 字段）：");
         citationTitles.stream().limit(3).forEach(t -> sb.append("《").append(t).append("》"));
+        if (dataOut != null) dataOut.put("citationMissing", true);
         return sb.toString();
     }
 
     private List<String> citationTitles(RagService.RecallDetail detail) {
         if (detail == null || detail.citations() == null) return List.of();
         return detail.citations().stream().map(c -> c.title()).toList();
+    }
+
+    /** 深度模式用量核算：优先按模型拆分计成本（usage_total.by_model，多模型路由下口径才真实），
+     *  旧版边车无拆分时回退单模型口径。estPrompt/estCompletion 为边车未回传用量时的本地估算。 */
+    private record DeepUsage(int promptTokens, int completionTokens, double costUsd, boolean actual) {}    private DeepUsage deepUsage(PythonSidecarService.SidecarResult sr, int estPrompt, int estCompletion) {
+        if (sr != null && sr.usageByModel() != null && !sr.usageByModel().isEmpty()) {
+            int p = 0, c = 0;
+            double cost = 0;
+            boolean allActual = true;
+            for (PythonSidecarService.ModelUsage mu : sr.usageByModel()) {
+                p += mu.promptTokens();
+                c += mu.completionTokens();
+                cost += tokenEstimator.estimateCostUsd(mu.model(), mu.promptTokens(), mu.completionTokens());
+                if (!"actual".equals(mu.source())) allActual = false;
+            }
+            if (p + c > 0) return new DeepUsage(p, c, cost, allActual);
+        }
+        PythonSidecarService.TokenUsage su = sr == null ? null : sr.usage();
+        int pT = su != null && su.promptTokens() > 0 ? su.promptTokens() : estPrompt;
+        int cT = su != null && su.completionTokens() > 0 ? su.completionTokens() : estCompletion;
+        boolean actual = su != null && "actual".equals(su.source());
+        return new DeepUsage(pT, cT, tokenEstimator.estimateCostUsd(pT, cT), actual);
+    }
+
+    private String budgetErrorJson(com.smartsupply.agent.cost.AgentBudgetService.BudgetStatus st) {
+        String msg = "今日 Agent 成本预算已用尽（" + st.describe() + "）。请联系管理员调整限额或明日再试。";
+        try {
+            return new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(Map.of("error", msg));
+        } catch (Exception ignored) {
+            return "{\"error\":\"daily agent budget exceeded\"}";
+        }
+    }
+
+    /** RAG 触发统一（/chat 与 /chat/stream 必须同口径）：contract 人设恒召回；消息含合同/风控/风险词召回。
+     *  此前 stream 只查"合同"，chat 还查"风控/风险"，同一问题在两条路径下检索行为不同。 */
+    private static boolean shouldRecall(String agentType, String message) {
+        return "contract".equals(agentType) || message.contains("合同") || message.contains("风控") || message.contains("风险");
+    }
+
+    /** 分块下发 token 事件：此前兜底路径 reply.split("") 逐字符 send（每个汉字一个 SSE 帧，千级事件）。
+     *  分块保持流式观感，事件数降两个数量级。 */
+    private static void sendTokenized(SseEmitter emitter, String text, int chunkSize) throws Exception {
+        if (text == null || text.isEmpty()) return;
+        for (int i = 0; i < text.length(); i += chunkSize) {
+            emitter.send(SseEmitter.event().data(text.substring(i, Math.min(i + chunkSize, text.length()))).name("token"));
+        }
+    }
+
+    /** 历史消息 token 估算：此前用 history.size()*50 魔法数（与"成本精确到分"的台账口径矛盾）。
+     *  按真实文本逐条估算，与 TokenEstimator 单一口径对齐。 */
+    private int estimateHistoryTokens(List<Message> history) {
+        int t = 0;
+        for (Message m : history) {
+            t += tokenEstimator.estimate(m.getText() == null ? "" : m.getText());
+        }
+        return t;
+    }
+
+    /** python trace 条目 → 步骤成败：provider 为 unavailable/error 视为失败。
+     *  此前落库一律 success=true，节点级失败信息进了台账又变回全绿，观测失真。 */
+    private static boolean stepOkFromTrace(Map<String, Object> tr) {
+        String provider = String.valueOf(tr.getOrDefault("provider", ""));
+        return !provider.equals("unavailable") && !provider.equals("error");
+    }
+
+    /** 深度模式 trace 落 agent_step（/chat 与 /chat/stream 共用，消除双份漂移的落库逻辑）。 */
+    private void insertPythonTraceSteps(long runId, List<Map<String, Object>> trace, int startSeq) {
+        int seq = startSeq;
+        for (Map<String, Object> tr : trace) {
+            Object stepName = tr.getOrDefault("tool", tr.getOrDefault("provider", tr.getOrDefault("name", "")));
+            observation.insertStep(runId, seq++, String.valueOf(tr.getOrDefault("node", "step")),
+                    String.valueOf(stepName), null, null, 0, stepOkFromTrace(tr));
+        }
+    }
+
+    /** 深度模式工具调用落 agent_tool_call（/chat 与 /chat/stream 共用）；userRole 统一为首角色（列语义为角色）。 */
+    private void insertPythonToolCalls(long runId, List<Map<String, Object>> toolResults,
+                                       com.fasterxml.jackson.databind.ObjectMapper om, String userRole) {
+        for (Map<String, Object> tcr : toolResults) {
+            Object args = tcr.get("args");
+            String argsJson;
+            try { argsJson = args == null ? "{}" : om.writeValueAsString(args); }
+            catch (Exception e) { argsJson = String.valueOf(args); }
+            boolean toolOk = !Boolean.FALSE.equals(tcr.get("ok"));
+            observation.insertToolCall(runId, null, String.valueOf(tcr.getOrDefault("tool", "tool")), argsJson,
+                    sha(String.valueOf(tcr.get("result"))), toolOk, 0, userRole);
+        }
+    }
+
+    private static String firstRole() {
+        return CurrentUser.roles().isEmpty() ? "" : CurrentUser.roles().get(0);
     }
 
     private static String sha(String s) {

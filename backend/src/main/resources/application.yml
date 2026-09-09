@@ -37,6 +37,15 @@ spring:
 smartsupply:
   ai:
     mock: ${AI_MOCK:true}
+    pricing:
+      # 成本核算（B1）：fallback 全局单价（USD/1k tokens）；多模型路由时按模型配价，未配价回退这里并告警
+      prompt-per-1k: ${AI_PRICING_PROMPT_PER_1K:0.0015}
+      completion-per-1k: ${AI_PRICING_COMPLETION_PER_1K:0.002}
+      # 按模型价格表（relaxed binding：ai.pricing.models.<模型名>.prompt-per-1k），示例：
+      # models:
+      #   mimo-v2.5:        { prompt-per-1k: 0.0020, completion-per-1k: 0.0060 }
+      #   gpt-4o-mini:      { prompt-per-1k: 0.00015, completion-per-1k: 0.0006 }
+      models: {}
     # 通义千问 / DeepSeek 兼容：切 base-url 与 model 即可
     # Embedding 端点与 Chat 解耦（可独立指向本地 Ollama 等 OpenAI 兼容 /v1/embeddings 服务）：
     #   EMBEDDING_BASE_URL=http://localhost:11434/v1  EMBEDDING_API_KEY=ollama  EMBEDDING_MODEL=qwen3-embedding:0.6b
@@ -60,6 +69,12 @@ smartsupply:
     tool:
       # 无 Key 演示允许匿名只读工具；prod 覆盖为 false（读工具同样要求登录）
       allow-anonymous-read: ${AGENT_TOOL_ALLOW_ANONYMOUS_READ:true}
+    # 成本管控（B3）：用户级日预算（USD/人/天），超限 /chat 与 /chat/stream 直接 429 拒绝。
+    # 0=关闭（默认不改现网行为）；生产按量级显式设置，如 5.0
+    daily-cost-limit-usd: ${AGENT_DAILY_COST_LIMIT_USD:0}
+    memory:
+      # 上下文窗口 token 预算（超预算老消息由滚动摘要承接语义）；0=退回固定 20 条旧口径
+      token-budget: ${AGENT_MEMORY_TOKEN_BUDGET:4000}
 
 security:
   cors:

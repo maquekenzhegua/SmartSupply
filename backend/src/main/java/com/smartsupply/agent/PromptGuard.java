@@ -14,11 +14,15 @@ import java.util.regex.Pattern;
 public class PromptGuard {
 
     private static final List<Pattern> INJECTION_PATTERNS = List.of(
-            Pattern.compile("ignore\\s+previous\\s+instructions", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("ignore\\s+(all\\s+)?(previous|prior|above)\\s+(instructions?|prompts?|rules?)", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("disregard\\s+(all\\s+)?(previous|prior|above|your)", Pattern.CASE_INSENSITIVE),
             Pattern.compile("system\\s*:\\s*", Pattern.CASE_INSENSITIVE),
-            Pattern.compile("忽略.*之前.*指令", Pattern.CASE_INSENSITIVE),
-            Pattern.compile("你是.*现在.*扮演", Pattern.CASE_INSENSITIVE),
-            Pattern.compile("jailbreak|DAN\\s+mode", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("忽略(以上|上面|之前|以前|前面)?(的)?(所有|全部)?(指令|提示词?|约束|规则)", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("忘记(之前|以前|上面|前面)(的)?(所有|全部)?(指令|设置|提示)", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("你是.*现在.*扮演|扮演(一个|新的|另一个)?(系统|管理员|DAN)", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("jailbreak|DAN\\s+mode|越狱模式|开发者模式", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("(输出|透露|显示|打印|reveal|print|show).{0,6}(你的)?(系统提示|system\\s+prompt|初始指令)", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("</\\s*(system|assistant|knowledge|user_query)\\s*>", Pattern.CASE_INSENSITIVE),
             Pattern.compile("```system", Pattern.CASE_INSENSITIVE)
     );
 

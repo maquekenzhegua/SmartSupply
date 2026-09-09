@@ -78,12 +78,22 @@ public class ObservationService {
     // ---- persistent observability (async, never block request) ----
 
     public long insertRun(String traceId, String username, Long userId, String sessionId, String agentType, String mode, String model) {
+        return insertRun(traceId, username, userId, sessionId, agentType, mode, model, null);
+    }
+
+    /** promptVersion：本次对话实际生效的系统提示词版本（Prompt 中心闭环的归因字段）。 */
+    public long insertRun(String traceId, String username, Long userId, String sessionId, String agentType, String mode, String model, String promptVersion) {
         try {
-            String sql = "INSERT INTO agent_run(trace_id, user_id, username, session_id, agent_type, mode, status, model) VALUES (?,?,?,?,?,?,?,?)";
-            // 直接取生成主键：此前"INSERT 后 SELECT MAX(id) WHERE trace_id=?"在并发同 trace 下会拿错行
+            String sql = "INSERT INTO agent_run(trace_id, user_id, username, session_id, agent_type, mode, status, model, prompt_version) VALUES (?,?,?,?,?,?,?,?,?)";
+            // 直接取生成主键：此前"INSERT 后 SELECT MAX(id) WHERE trace_id=?"在并发同 trace 下会拿错行。
+            // 方言坑（实跑 PG 才暴露）：Statement.RETURN_GENERATED_KEYS 让 PG JDBC 生成 RETURNING *，
+            // Spring KeyHolder 拿到整行 → getKey() 抛"multiple keys" → insertRun 返回 -1 →
+            // completeRun/insertStep/insertToolCall/budget.addCost 整块被跳过：台账永久 RUNNING/无步骤、
+            // 日预算闸门从不累计成本。而 H2 单列返回 id，测试全绿——测试方言掩盖了生产方言。
+            // 修复：显式声明主键列 → PG 生成 RETURNING id（单列），H2 同样支持。
             org.springframework.jdbc.support.KeyHolder kh = new org.springframework.jdbc.support.GeneratedKeyHolder();
             jdbc.update(con -> {
-                var ps = con.prepareStatement(sql, java.sql.Statement.RETURN_GENERATED_KEYS);
+                var ps = con.prepareStatement(sql, new String[]{"id"});
                 ps.setString(1, traceId);
                 if (userId == null) ps.setNull(2, java.sql.Types.BIGINT); else ps.setLong(2, userId);
                 ps.setString(3, username);
@@ -92,6 +102,7 @@ public class ObservationService {
                 ps.setString(6, mode);
                 ps.setString(7, "RUNNING");
                 ps.setString(8, model);
+                if (promptVersion == null) ps.setNull(9, java.sql.Types.VARCHAR); else ps.setString(9, promptVersion);
                 return ps;
             }, kh);
             Number id = kh.getKey();
@@ -132,8 +143,16 @@ public class ObservationService {
     public void insertToolCall(long runId, Long stepId, String tool, String argsJson, String resultDigest, boolean success, long latencyMs, String userRole) {
         persistPool.execute(() -> {
             try {
-                jdbc.update("INSERT INTO agent_tool_call(run_id, step_id, tool, args_json, result_digest, success, latency_ms, user_role) VALUES (?,?,?,?,?,?,?,?)",
-                        runId, stepId, tool, argsJson, resultDigest, success, (int) latencyMs, userRole);
+                // args_json 在 PG 是 JSONB 列：字符串参数必须显式 CAST 才能写入；
+                // H2（测试/demo，args_json=TEXT）不识别 jsonb 类型名 → BadSqlGrammar 时回退直插。
+                // 此前单条 SQL 在 H2 测试全绿、PG 实跑全部失败（工具调用台账整表缺失）。
+                try {
+                    jdbc.update("INSERT INTO agent_tool_call(run_id, step_id, tool, args_json, result_digest, success, latency_ms, user_role) VALUES (?,?,?,CAST(? AS jsonb),?,?,?,?)",
+                            runId, stepId, tool, argsJson, resultDigest, success, (int) latencyMs, userRole);
+                } catch (org.springframework.jdbc.BadSqlGrammarException castUnsupported) {
+                    jdbc.update("INSERT INTO agent_tool_call(run_id, step_id, tool, args_json, result_digest, success, latency_ms, user_role) VALUES (?,?,?,?,?,?,?,?)",
+                            runId, stepId, tool, argsJson, resultDigest, success, (int) latencyMs, userRole);
+                }
             } catch (Exception e) { log.warn("insertToolCall failed: {}", e.toString()); }
         });
     }

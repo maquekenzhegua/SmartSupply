@@ -13,7 +13,8 @@ import java.util.Set;
  * 工具层安全校验：读工具要求登录且可追溯（记录调用者），写工具要求 ADMIN 角色 + 审计；
  * 同时提供请求级工具调用追踪（ThreadLocal），供 /api/agent/chat 返回 tools 字段给前端展示。
  * 注意：ThreadLocal 追踪只在同步调用线程可靠，SSE 流式路径由 done 事件尽力回传。
- * demo 降级开关：smartsupply.agent.tool.allow-anonymous-read（prod 置 false，匿名读也拒绝）。
+ * 匿名读开关：smartsupply.agent.tool.allow-anonymous-read——代码默认 false（fail-closed），
+ * 演示环境由 application.yml 显式开 true；未配置该属性的环境（如新 profile）一律要求登录。
  */
 @Component
 public class ToolSecurity {
@@ -25,7 +26,7 @@ public class ToolSecurity {
 
     private final boolean allowAnonymousRead;
 
-    public ToolSecurity(@Value("${smartsupply.agent.tool.allow-anonymous-read:true}") boolean allowAnonymousRead) {
+    public ToolSecurity(@Value("${smartsupply.agent.tool.allow-anonymous-read:false}") boolean allowAnonymousRead) {
         this.allowAnonymousRead = allowAnonymousRead;
     }
 

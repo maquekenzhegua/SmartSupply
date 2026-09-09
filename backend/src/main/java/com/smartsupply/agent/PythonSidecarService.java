@@ -41,15 +41,25 @@ public class PythonSidecarService {
      */
     public record SidecarResult(String reply, List<Map<String, Object>> trace, List<Map<String, Object>> toolResults,
                                 int iters, boolean degraded, String degradeReason, TokenUsage usage,
-                                String threadId, boolean interrupted, List<Map<String, Object>> confirm) {
+                                String threadId, boolean interrupted, List<Map<String, Object>> confirm,
+                                List<ModelUsage> usageByModel) {
         public SidecarResult(String reply, List<Map<String, Object>> trace, List<Map<String, Object>> toolResults,
                              int iters, boolean degraded, String degradeReason, TokenUsage usage) {
-            this(reply, trace, toolResults, iters, degraded, degradeReason, usage, "", false, List.of());
+            this(reply, trace, toolResults, iters, degraded, degradeReason, usage, "", false, List.of(), List.of());
+        }
+
+        public SidecarResult(String reply, List<Map<String, Object>> trace, List<Map<String, Object>> toolResults,
+                             int iters, boolean degraded, String degradeReason, TokenUsage usage,
+                             String threadId, boolean interrupted, List<Map<String, Object>> confirm) {
+            this(reply, trace, toolResults, iters, degraded, degradeReason, usage, threadId, interrupted, confirm, List.of());
         }
     }
 
     /** 边车回传的真实 provider 用量；null/0 值由调用方回退估算 */
     public record TokenUsage(int promptTokens, int completionTokens, String source) {}
+
+    /** 按模型拆分的用量（usage_total.by_model）：多模型路由下成本必须按模型计价 */
+    public record ModelUsage(String model, int promptTokens, int completionTokens, String source) {}
 
     public PythonSidecarService(
             @Value("${smartsupply.agent-python.enabled:false}") boolean enabled,
@@ -75,8 +85,8 @@ public class PythonSidecarService {
         if (!enabled) return false;
         long until = openUntil.get();
         if (until > System.currentTimeMillis()) return false;
-        if (until != 0) {
-            openUntil.set(0);
+        // 熔断恢复的清零必须 CAS：并发下两个线程同时通过会把对方刚累计的失败计数一并清掉
+        if (until != 0 && openUntil.compareAndSet(until, 0)) {
             failures.set(0);
         }
         return true;
@@ -141,7 +151,7 @@ public class PythonSidecarService {
                 }
                 failures.set(0);
                 return new SidecarResult(text, trace, toolResults, iters, degraded, degradeReason, parseUsage(resp),
-                        respThreadId, interrupted, confirm);
+                        respThreadId, interrupted, confirm, parseUsageByModel(resp));
             } catch (RestClientResponseException e) {
                 if (e.getStatusCode().value() == 400) {
                     // 请求本身有错：重试无意义，如实作为 degraded 结果上抛
@@ -202,6 +212,25 @@ public class PythonSidecarService {
         String src = String.valueOf(m.getOrDefault("source", "estimated"));
         if (pt <= 0 && ct <= 0) return null;
         return new TokenUsage(pt, ct, src);
+    }
+
+    /** usage_total.by_model → 按模型用量列表；缺省（旧版边车）返回空列表，调用方回退单模型口径。 */
+    @SuppressWarnings("unchecked")
+    private static List<ModelUsage> parseUsageByModel(Map<String, Object> resp) {
+        Object u = resp == null ? null : resp.get("usage_total");
+        if (!(u instanceof Map)) return List.of();
+        Object bm = ((Map<String, Object>) u).get("by_model");
+        if (!(bm instanceof Map)) return List.of();
+        List<ModelUsage> out = new java.util.ArrayList<>();
+        for (Map.Entry<String, Object> e : ((Map<String, Object>) bm).entrySet()) {
+            if (!(e.getValue() instanceof Map)) continue;
+            Map<String, Object> m = (Map<String, Object>) e.getValue();
+            out.add(new ModelUsage(e.getKey(),
+                    m.get("prompt_tokens") instanceof Number n ? n.intValue() : 0,
+                    m.get("completion_tokens") instanceof Number n ? n.intValue() : 0,
+                    String.valueOf(m.getOrDefault("source", "estimated"))));
+        }
+        return out;
     }
 
     private void sleepBackoff(long ms) {
@@ -268,6 +297,7 @@ public class PythonSidecarService {
             String degradeReason = "";
             int iters = 0;
             TokenUsage usage = null;
+            List<ModelUsage> usageByModel = new java.util.ArrayList<>();
             boolean interrupted = false;
             String outThreadId = threadId == null ? "" : threadId;
             List<Map<String, Object>> confirm = new java.util.ArrayList<>();
@@ -324,6 +354,7 @@ public class PythonSidecarService {
                         degradeReason = String.valueOf(parsed.getOrDefault("degrade_reason", ""));
                         iters = parsed.get("iters") instanceof Number n ? n.intValue() : 0;
                         usage = parseUsage(parsed);
+                        usageByModel = parseUsageByModel(Map.of("usage_total", parsed));
                         interrupted = Boolean.TRUE.equals(parsed.get("interrupted"));
                         Object tid = parsed.get("thread_id");
                         if (tid != null && !String.valueOf(tid).isBlank()) outThreadId = String.valueOf(tid);
@@ -339,7 +370,7 @@ public class PythonSidecarService {
             failures.set(0);
             if (degraded) log.warn("sidecar stream degraded (reason={})", degradeReason);
             return new SidecarResult(reply.toString(), trace, toolResults, iters, degraded, degradeReason, usage,
-                    outThreadId, interrupted, confirm);
+                    outThreadId, interrupted, confirm, usageByModel);
         } catch (java.io.IOException e) {  // 含 HttpTimeoutException（其子类）
             int f = failures.incrementAndGet();
             if (f >= CIRCUIT_THRESHOLD) {

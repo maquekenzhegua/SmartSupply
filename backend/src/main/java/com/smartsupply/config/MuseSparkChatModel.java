@@ -31,6 +31,8 @@ import reactor.core.scheduler.Schedulers;
 public class MuseSparkChatModel implements ChatModel {
 
     private static final Logger log = LoggerFactory.getLogger(MuseSparkChatModel.class);
+    // opencode zen/go 网关要求每次对话携带稳定会话头（缺失 400 MissingSessionID）
+    private final String opencodeSession = "smartsupply-jvm-" + java.util.UUID.randomUUID();
     private final String apiKey;
     private final String baseUrl;
     private final String model;
@@ -76,6 +78,8 @@ public class MuseSparkChatModel implements ChatModel {
                 .timeout(Duration.ofSeconds(90))
                 .header("Authorization", "Bearer " + apiKey)
                 .header("Content-Type", "application/json")
+                .header("x-opencode-session", opencodeSession)
+                .header("User-Agent", "smartsupply-agent/1.0")
                 .POST(HttpRequest.BodyPublishers.ofString(body))
                 .build();
         try {
@@ -175,6 +179,8 @@ public class MuseSparkChatModel implements ChatModel {
                         .header("Authorization", "Bearer " + apiKey)
                         .header("Content-Type", "application/json")
                         .header("Accept", "text/event-stream")
+                        .header("x-opencode-session", opencodeSession)
+                        .header("User-Agent", "smartsupply-agent/1.0")
                         .POST(HttpRequest.BodyPublishers.ofString(om.writeValueAsString(payload)))
                         .build();
                 HttpResponse<java.util.stream.Stream<String>> resp =

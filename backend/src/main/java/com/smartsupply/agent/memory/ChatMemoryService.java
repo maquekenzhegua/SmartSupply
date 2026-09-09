@@ -1,5 +1,6 @@
 package com.smartsupply.agent.memory;
 
+import com.smartsupply.agent.TokenEstimator;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -11,6 +12,7 @@ import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
@@ -20,24 +22,50 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Redis 短期记忆 + DB 长期记忆 + 摘要压缩。
- * 短期：Redis agent:memory:{sessionId} 7天，近20轮进上下文，最多40条。
- * 长期：chat_session + chat_message 落库，可审计可恢复。
- * 摘要：超过40条时压缩老消息为 summary 存 Redis，不丢上下文语义。
+ * Redis 短期记忆 + DB 长期记忆 + 摘要压缩 + token 预算窗口。
+ * 短期：Redis agent:memory:{sessionId}（List 结构）7天，窗口按 token 预算裁剪（缺省 4000 token，0=退回固定 20 条）。
+ *   并发修复：旧实现把消息列表存成单个 JSON 字符串，append 是"读-改-写"非原子——并发 append 会互相覆盖丢消息；
+ *   现改为 Redis List，每条消息 RPUSH（天然原子），超限裁剪与摘要提取由 Lua 脚本原子完成。
+ * 长期：chat_session + chat_message 落库，可审计可恢复；会话以 session_key 等值定位（title 反查仅兜底）。
+ *   会话修复：创建会话的 INSERT 直接带 user_id（此前先建无主会话靠"首个写入者认领"，
+ *   认领前存在 IDOR 窗口）；存量无主会话仍保留认领兜底。
+ * 摘要：超过40条时压缩老消息为 summary——Redis 与 chat_session.summary 双写（Redis 丢失可从 DB 恢复）。
  */
 @Service
 public class ChatMemoryService {
 
     private static final Logger log = LoggerFactory.getLogger(ChatMemoryService.class);
+    /** 滚动窗口容量：列表内最多保留的最新消息数，超出的旧消息交给摘要压缩 */
+    private static final long WINDOW = 40;
+    private static final long TTL_SECONDS = 7 * 24 * 3600;
+
+    /** 原子裁剪脚本：返回被裁掉的旧消息（供摘要压缩），LTRIM 与读取在 Lua 内原子完成。
+     *  此前"LRANGE 再 LTRIM"两步分离，两个并发请求可能重复压缩/互相覆盖摘要。 */
+    private static final DefaultRedisScript<List> TRIM_OLD_SCRIPT = new DefaultRedisScript<>(
+            "local len = redis.call('LLEN', KEYS[1]) " +
+            "local keep = tonumber(ARGV[1]) " +
+            "if len <= keep then return nil end " +
+            "local old = redis.call('LRANGE', KEYS[1], 0, len - keep - 1) " +
+            "redis.call('LTRIM', KEYS[1], len - keep, -1) " +
+            "redis.call('EXPIRE', KEYS[1], ARGV[2]) " +
+            "return old", List.class);
+
     private final StringRedisTemplate redis;
     private final ObjectMapper om;
     private final JdbcTemplate jdbc;
+    private final TokenEstimator tokenEstimator;
+    private final int tokenBudget;
     @Autowired(required=false) private ChatClient chatClient;
 
-    public ChatMemoryService(StringRedisTemplate redis, ObjectMapper om, JdbcTemplate jdbc) {
+    public ChatMemoryService(StringRedisTemplate redis, ObjectMapper om, JdbcTemplate jdbc,
+                             TokenEstimator tokenEstimator,
+                             @org.springframework.beans.factory.annotation.Value(
+                                     "${smartsupply.agent.memory.token-budget:4000}") int tokenBudget) {
         this.redis = redis;
         this.om = om;
         this.jdbc = jdbc;
+        this.tokenEstimator = tokenEstimator;
+        this.tokenBudget = Math.max(0, tokenBudget);
     }
 
     private String key(String sessionId) { return "agent:memory:" + sessionId; }
@@ -45,73 +73,142 @@ public class ChatMemoryService {
 
     public record MemorySnapshot(List<Map<String, String>> messages, String summary) {}
 
+    /** 会话定位：session_key 等值查询优先（唯一索引，确定性），title 反查仅作存量兜底。
+     *  此前 title=sessionId 反查 + ORDER BY id DESC LIMIT 1 是脆弱路径（title 非键，同名即歧义）。 */
+    private Long findSessionId(String sessionId) {
+        try {
+            return jdbc.queryForObject("SELECT id FROM chat_session WHERE session_key=? ORDER BY id DESC LIMIT 1", Long.class, sessionId);
+        } catch (Exception ignored) {}
+        try {
+            return jdbc.queryForObject("SELECT id FROM chat_session WHERE title=? ORDER BY id DESC LIMIT 1", Long.class, sessionId);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 供编排层做会话定位：session_key 等值优先，title 反查仅兜底（替代旧的裸 title 反查）。 */
+    public Long findSessionDbId(String sessionId) {
+        return findSessionId(sessionId);
+    }
+
+    /** Redis 摘要缺失时从 DB 恢复（摘要双写的读路径）。 */
+    private String loadSummary(String sessionId) {
+        try {
+            String s = redis.opsForValue().get(summaryKey(sessionId));
+            if (s != null && !s.isBlank()) return s;
+        } catch (Exception ignored) {}
+        try {
+            Long sid = findSessionId(sessionId);
+            if (sid != null) {
+                String s = jdbc.queryForObject("SELECT COALESCE(summary,'') FROM chat_session WHERE id=?", String.class, sid);
+                if (s != null && !s.isBlank()) return s;
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
+
+    private void persistSummary(String sessionId, String summary) {
+        try {
+            Long sid = findSessionId(sessionId);
+            if (sid != null) {
+                jdbc.update("UPDATE chat_session SET summary=? WHERE id=?", summary, sid);
+            }
+        } catch (Exception e) {
+            log.debug("summary 持久化失败（Redis 仍可用）: {}", e.toString());
+        }
+    }
+
+    /** token 预算窗口：从最新往回保留，预算内尽量多留（至少最近两条）；超预算的老消息交给摘要语义承接。
+     *  tokenBudget<=0 时退回旧口径（最多 21 条含 system）。 */
+    private List<Message> trim(List<Message> out) {
+        int head = 0;
+        while (head < out.size() && out.get(head) instanceof SystemMessage) head++;
+        if (tokenBudget <= 0) {
+            if (out.size() > 21) {
+                List<Message> trimmed = new ArrayList<>(out.subList(0, head));
+                trimmed.addAll(out.subList(Math.max(head, out.size() - 20), out.size()));
+                return trimmed;
+            }
+            return out;
+        }
+        int used = 0;
+        int keepFrom = out.size();
+        for (int i = out.size() - 1; i >= head; i--) {
+            String text = out.get(i).getText() == null ? "" : out.get(i).getText();
+            int t = tokenEstimator.estimate(text);
+            if (used + t > tokenBudget && i < out.size() - 2) break;  // 至少保留最近两条
+            used += t;
+            keepFrom = i;
+        }
+        if (keepFrom <= head) return out;
+        List<Message> trimmed = new ArrayList<>(out.subList(0, head));
+        trimmed.addAll(out.subList(keepFrom, out.size()));
+        return trimmed;
+    }
+
     @SuppressWarnings("unchecked")
     public List<Message> load(String sessionId, String systemPrompt) {
         List<Message> out = new ArrayList<>();
         if (systemPrompt != null && !systemPrompt.isBlank()) out.add(new SystemMessage(systemPrompt));
-        // 滚动摘要注入：compress() 的产物此前只写不读（死代码），老对话语义在 20 条窗口外直接丢失
-        String summary = null;
-        try { summary = redis.opsForValue().get(summaryKey(sessionId)); } catch (Exception e) { summary = null; }
+        // 滚动摘要注入：Redis 缺失时从 DB 恢复（双写读路径）
+        String summary = loadSummary(sessionId);
         if (summary != null && !summary.isBlank()) {
             out.add(new SystemMessage("[历史对话摘要] " + summary));
         }
-        String json;
-        try { json = redis.opsForValue().get(key(sessionId)); } catch (Exception e) { json = null; }
-        if (json != null && !json.isBlank()) {
+        // 短期记忆读取：List 结构逐条反序列化（RPUSH append 天然原子，无读改写竞态）
+        List<String> items = null;
+        try { items = redis.opsForList().range(key(sessionId), 0, -1); } catch (Exception e) { items = null; }
+        if (items != null && !items.isEmpty()) {
+            boolean parsed = false;
             try {
-                List<Map<String, String>> raw = om.readValue(json, new TypeReference<>() {});
-                for (Map<String, String> m : raw) {
+                for (String item : items) {
+                    Map<String, String> m = om.readValue(item, new TypeReference<Map<String, String>>() {});
                     String role = m.get("role");
                     String content = m.get("content");
                     if ("user".equals(role)) out.add(new UserMessage(content));
                     else if ("assistant".equals(role)) out.add(new AssistantMessage(content));
                 }
+                parsed = true;
             } catch (Exception ignored) {}
-            if (out.size() > 21) {
-                List<Message> trimmed = new ArrayList<>();
-                trimmed.add(out.get(0));
-                trimmed.addAll(out.subList(Math.max(1, out.size() - 20), out.size()));
-                return trimmed;
-            }
-            return out;
+            if (parsed) return trim(out);
         }
-        // Redis miss -> DB 恢复
+        // Redis miss（或旧版单字符串格式，WRONGTYPE 已在上面落空）-> DB 恢复
         try {
-            Long sessionDbId = jdbc.queryForObject("SELECT id FROM chat_session WHERE title=? ORDER BY id DESC LIMIT 1", Long.class, sessionId);
-            if (sessionDbId != null) {
-                List<Map<String, Object>> rows = jdbc.queryForList(
-                        "SELECT role, content FROM chat_message WHERE session_id=? ORDER BY id DESC LIMIT 40", sessionDbId);
-                List<Message> dbMsgs = new ArrayList<>();
-                for (int i = rows.size() - 1; i >= 0; i--) {
-                    Map<String, Object> r = rows.get(i);
-                    String role = String.valueOf(r.get("role"));
-                    String content = String.valueOf(r.get("content"));
-                    if ("user".equals(role)) dbMsgs.add(new UserMessage(content));
-                    else if ("assistant".equals(role)) dbMsgs.add(new AssistantMessage(content));
-                }
-                out.addAll(dbMsgs);
-                // 回写 Redis 加速下次
-                if (!dbMsgs.isEmpty()) {
-                    try {
-                        List<Map<String, String>> toCache = new ArrayList<>();
-                        for (Message m : dbMsgs) {
-                            String role = (m instanceof UserMessage) ? "user" : "assistant";
-                            toCache.add(Map.of("role", role, "content", m.getText() == null ? "" : m.getText()));
-                        }
-                        redis.opsForValue().set(key(sessionId), om.writeValueAsString(toCache), 7, TimeUnit.DAYS);
-                    } catch (Exception ignored) {}
-                }
-            }
+            rebuildListFromDb(sessionId);
         } catch (Exception e) {
             log.debug("DB memory load fallback failed sessionId={}: {}", sessionId, e.toString());
         }
-        if (out.size() > 21) {
-            List<Message> trimmed = new ArrayList<>();
-            trimmed.add(out.get(0));
-            trimmed.addAll(out.subList(Math.max(1, out.size() - 20), out.size()));
-            return trimmed;
+        return trim(out);
+    }
+
+    /** 从 DB 重建 Redis List（首次访问/旧格式迁移/缓存丢失后回写），恢复后回写 Redis 加速下次。 */
+    private void rebuildListFromDb(String sessionId) {
+        Long sessionDbId = findSessionId(sessionId);
+        if (sessionDbId == null) return;
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "SELECT role, content FROM chat_message WHERE session_id=? ORDER BY id DESC LIMIT 40", sessionDbId);
+        if (rows.isEmpty()) return;
+        List<String> items = new ArrayList<>();
+        for (int i = rows.size() - 1; i >= 0; i--) {
+            Map<String, Object> r = rows.get(i);
+            items.add(messageJson(String.valueOf(r.get("role")), String.valueOf(r.get("content"))));
         }
-        return out;
+        String k = key(sessionId);
+        try {
+            redis.delete(k);  // 清掉可能存在的旧版字符串格式（WRONGTYPE）或半写状态
+            redis.opsForList().rightPushAll(k, items);
+            redis.expire(k, TTL_SECONDS, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            log.debug("Redis rebuild failed sessionId={}: {}", sessionId, e.toString());
+        }
+    }
+
+    private String messageJson(String role, String content) {
+        try {
+            return om.writeValueAsString(Map.of("role", role, "content", content == null ? "" : content));
+        } catch (Exception e) {
+            return "{\"role\":\"" + role + "\",\"content\":\"\"}";
+        }
     }
 
     public void append(String sessionId, String role, String content) {
@@ -121,42 +218,60 @@ public class ChatMemoryService {
     public void append(String sessionId, String role, String content, String username) {
         String k = key(sessionId);
         try {
-            String json = redis.opsForValue().get(k);
-            List<Map<String, String>> list;
-            if (json == null || json.isBlank()) list = new ArrayList<>();
-            else list = om.readValue(json, new TypeReference<>() {});
-            list.add(Map.of("role", role, "content", content == null ? "" : content));
-            // 摘要压缩：超过40条时把最老的20条压缩为 summary
-            String summary = null;
-            try { summary = redis.opsForValue().get(summaryKey(sessionId)); } catch (Exception ignored) {}
-            if (list.size() > 40) {
-                List<Map<String, String>> old = list.subList(0, list.size() - 40);
-                List<Map<String, String>> kept = new ArrayList<>(list.subList(list.size() - 40, list.size()));
-                String compressed = compress(old, summary);
+            // RPUSH 单条消息：原子 append，并发不丢消息（旧实现读-改-写会互相覆盖）
+            redis.opsForList().rightPush(k, messageJson(role, content));
+            redis.expire(k, TTL_SECONDS, TimeUnit.SECONDS);
+            // 超窗压缩：Lua 原子"取旧+LTRIM"，返回被裁掉的旧消息；摘要压缩（LLM/规则）在 Java 侧做，
+            // 摘要 key 为覆盖写（幂等），并发压缩最多多算一次 LLM，不会丢消息
+            List<Object> old = redis.execute(TRIM_OLD_SCRIPT, List.of(k),
+                    String.valueOf(WINDOW), String.valueOf(TTL_SECONDS));
+            if (old != null && !old.isEmpty()) {
+                List<Map<String, String>> olds = new ArrayList<>();
+                for (Object o : old) {
+                    olds.add(om.readValue(String.valueOf(o), new TypeReference<Map<String, String>>() {}));
+                }
+                String prev = null;
+                try { prev = redis.opsForValue().get(summaryKey(sessionId)); } catch (Exception ignored) {}
+                String compressed = compress(olds, prev);
                 try { redis.opsForValue().set(summaryKey(sessionId), compressed, 7, TimeUnit.DAYS); } catch (Exception ignored) {}
-                list = kept;
+                persistSummary(sessionId, compressed);  // 摘要双写：Redis 丢失/重启后可从 chat_session.summary 恢复
             }
-            redis.opsForValue().set(k, om.writeValueAsString(list), 7, TimeUnit.DAYS);
         } catch (Exception e) {
-            log.debug("Redis append failed sessionId={}: {}", sessionId, e.toString());
+            // 旧版单字符串格式（WRONGTYPE）迁移：从 DB 重建 List 后重试一次 append
+            if (String.valueOf(e).contains("WRONGTYPE")) {
+                try {
+                    rebuildListFromDb(sessionId);
+                    redis.opsForList().rightPush(k, messageJson(role, content));
+                    redis.expire(k, TTL_SECONDS, TimeUnit.SECONDS);
+                } catch (Exception e2) {
+                    log.debug("Redis append retry after migration failed sessionId={}: {}", sessionId, e2.toString());
+                }
+            } else {
+                log.debug("Redis append failed sessionId={}: {}", sessionId, e.toString());
+            }
         }
         // DB 落库（不阻断主流程）
         try {
-            Long sessionDbId = null;
-            try { sessionDbId = jdbc.queryForObject("SELECT id FROM chat_session WHERE title=? ORDER BY id DESC LIMIT 1", Long.class, sessionId); } catch (Exception ignored) {}
+            Long sessionDbId = findSessionId(sessionId);
             if (sessionDbId == null) {
                 try {
                     Long userId = resolveUserId(username);
-                    jdbc.update("INSERT INTO chat_session(agent_type, title, user_id) VALUES (?,?,?)", "general", sessionId, userId);
-                    sessionDbId = jdbc.queryForObject("SELECT id FROM chat_session WHERE title=? ORDER BY id DESC LIMIT 1", Long.class, sessionId);
+                    // session_key 唯一键 + 创建即归属：消除"先建无主会话再认领"之间的 IDOR 窗口
+                    jdbc.update("INSERT INTO chat_session(agent_type, title, session_key, user_id) VALUES (?,?,?,?)",
+                            "general", sessionId, sessionId, userId);
+                    sessionDbId = findSessionId(sessionId);
                 } catch (Exception ex) {
                     log.debug("create chat_session failed: {}", ex.toString());
                 }
+            } else {
+                // 存量会话补 session_key（幂等回填）
+                try { jdbc.update("UPDATE chat_session SET session_key=? WHERE id=? AND session_key IS NULL", sessionId, sessionDbId); }
+                catch (Exception ignored) {}
             }
             if (sessionDbId != null) {
                 jdbc.update("INSERT INTO chat_message(session_id, role, content) VALUES (?,?,?)",
                         sessionDbId, role, content == null ? "" : content);
-                // 认领存量无主会话：首个写入者绑定（已绑定则不动），配合 canAccess 形成会话隔离闭环
+                // 认领存量无主会话（历史数据兜底）：新会话已在 INSERT 时归属
                 Long claimUserId = resolveUserId(username);
                 if (claimUserId != null) {
                     jdbc.update("UPDATE chat_session SET user_id=? WHERE id=? AND user_id IS NULL", claimUserId, sessionDbId);
@@ -172,7 +287,7 @@ public class ChatMemoryService {
         try {
             List<Map<String, Object>> rows = jdbc.queryForList(
                     "SELECT u.username AS \"username\" FROM chat_session s LEFT JOIN sys_user u ON u.id=s.user_id " +
-                            "WHERE s.title=? ORDER BY s.id DESC LIMIT 1", sessionId);
+                            "WHERE s.session_key=? OR s.title=? ORDER BY s.id DESC LIMIT 1", sessionId, sessionId);
             if (rows.isEmpty()) return null;
             Object uname = rows.get(0).get("username");
             return uname == null ? null : String.valueOf(uname);
@@ -233,14 +348,13 @@ public class ChatMemoryService {
             String role = (m instanceof UserMessage) ? "user" : "assistant";
             msgs.add(Map.of("role", role, "content", m.getText() == null ? "" : m.getText()));
         }
-        String summary = null;
-        try { summary = redis.opsForValue().get(summaryKey(sessionId)); } catch (Exception ignored) {}
+        String summary = loadSummary(sessionId);
         if (summary == null) {
             try {
-                Long sid = jdbc.queryForObject("SELECT id FROM chat_session WHERE title=? ORDER BY id DESC LIMIT 1", Long.class, sessionId);
+                Long sid = findSessionId(sessionId);
                 if (sid != null) {
                     Long count = jdbc.queryForObject("SELECT COUNT(*) FROM chat_message WHERE session_id=?", Long.class, sid);
-                    if (count != null && count > 40) summary = "已持久化 " + count + " 条，近期进窗 20 轮，历史落库可追溯";
+                    if (count != null && count > 40) summary = "已持久化 " + count + " 条，近期按 token 预算进窗，历史落库可追溯";
                 }
             } catch (Exception ignored) {}
         }

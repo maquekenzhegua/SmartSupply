@@ -17,6 +17,10 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
 /**
  * 模型装配：
  * - smartsupply.ai.mock=true（默认）：Chat/Embedding 全部走 Mock，保证离线演示与 CI 不依赖外部服务。
@@ -59,6 +63,12 @@ public class AiConfig {
         OpenAiApi.Builder apiBuilder = OpenAiApi.builder().apiKey(apiKey).baseUrl(baseUrl);
         if (baseUrl != null && (baseUrl.endsWith("/v1") || baseUrl.endsWith("/v4") || baseUrl.endsWith("/compatible-mode"))) {
             apiBuilder.completionsPath("/chat/completions").embeddingsPath("/embeddings");
+        }
+        if (baseUrl != null && baseUrl.contains("opencode")) {
+            // opencode zen/go 网关要求每次对话携带稳定会话头 x-opencode-session（缺失 400 MissingSessionID）
+            apiBuilder.headers(new org.springframework.util.LinkedMultiValueMap<>(Map.of(
+                    "x-opencode-session", new ArrayList<>(List.of("smartsupply-jvm-" + java.util.UUID.randomUUID())),
+                    "User-Agent", new ArrayList<>(List.of("smartsupply-agent/1.0")))));
         }
         log.info("ChatModel=openai-compatible baseUrl={} model={}", baseUrl, model);
         return OpenAiChatModel.builder()
