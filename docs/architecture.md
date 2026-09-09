@@ -11,10 +11,10 @@
 - 接入层：Vue3 + Vite + Element Plus + Pinia + Vue-ECharts；全局 Ask Agent 搜框 + Agent 工作台 + 各业务页的 AI 入口
 - 网关与鉴权：Spring Security + JWT（`JwtAuthFilter`），CORS 放行，`/api/auth/**` 免鉴权，`actuator/prometheus` 需鉴权
 - 业务域：supplier / product / sku / inventory / purchase / contract / bi，统一 `JdbcTemplate` + 参数化 ILIKE，`SqlValidator` 白名单
-- Agent 层：`ChatClient` + `@Tool(7)` + `VectorStore(HNSW)` + `RagService(向量8->双轨重排4 auto:cross-encoder->BM25回退+关键词兜底)` + `PromptRegistry(版本化)` + `PromptGuard(注入消毒+标签隔离)` + `ReplenishmentScheduler`
+- Agent 层：`ChatClient` + `@Tool(8)`（7 只读 + 1 HITL 写）+ `VectorStore(HNSW)` + `RagService(向量8->双轨重排4 auto:cross-encoder->BM25回退+关键词兜底)` + `PromptRegistry(版本化)` + `PromptGuard(注入消毒+标签隔离)` + `ReplenishmentScheduler`
 - 重排：`Reranker(BM25离线)` + `CrossEncoderReranker(调 Python /api/rag/rerank，熔断回退)` + `RAG_RERANK_MODE=auto|bm25|cross-encoder`
 - 深度推理：`agent-python` LangGraph `planner->tools->reflector->reasoner` 真 ReAct，`MAX_ITERS=6`，trace 可审计
-- 基础设施：PostgreSQL + pgvector、Redis、MinIO，Docker Compose 一键起
+- 基础设施：PostgreSQL + pgvector、Redis，Docker Compose 一键起
 - 观测：agent_run/step/tool_call/user_feedback + prompt_version 落库，TraceId 跨 Java/Python，jTokkit 真实计费
 - 治理：/api/admin/agent/{runs,costs,prompts,eval} ADMIN 只读
 

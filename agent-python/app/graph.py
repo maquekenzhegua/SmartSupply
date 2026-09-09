@@ -34,6 +34,7 @@ from typing import TypedDict, List, Dict, Any, Literal, Optional, Callable
 from contextvars import ContextVar
 import asyncio
 import json
+import math
 import re
 import uuid
 from langgraph.graph import StateGraph, END
@@ -170,15 +171,27 @@ def _validate_calls(raw_calls: List[Dict[str, Any]], allowed: Optional[set] = No
                 break
             want = spec.get("type")
             if want == "integer":
+                # bool 是 int 的子类：int(True)=1 会把布尔静默变成数量 1，先排除
+                if isinstance(val, bool):
+                    bad = f"bad-integer:{key}={val}"
+                    break
                 try:
                     val = int(val)
                 except (TypeError, ValueError):
                     bad = f"bad-integer:{key}={val}"
                     break
             elif want == "number":
+                if isinstance(val, bool):
+                    bad = f"bad-number:{key}={val}"
+                    break
                 try:
                     val = float(val)
                 except (TypeError, ValueError):
+                    bad = f"bad-number:{key}={val}"
+                    break
+                # NaN/inf 一路 json 序列化进 Java 会变成非法数值（Jackson 默认拒绝），
+                # 且 "校验通过"的外表会掩盖模型输出的数学垃圾
+                if not math.isfinite(val):
                     bad = f"bad-number:{key}={val}"
                     break
             elif want == "string":
@@ -659,13 +672,17 @@ def build_graph(checkpointer):
 
 # 惰性单例：checkpointer 实现依赖 CHECKPOINT_URI，且 AsyncPostgresSaver 构造需要运行中的
 # event loop（内部 asyncio.Lock 绑定 loop），因此延迟到首个请求协程内再构建。
+# 实现（memory↔postgres）切换时 generation 变化，需重建已编译图（自愈切换场景）。
 _graph = None
+_graph_generation = -1
 
 
 async def get_graph():
-    global _graph
-    if _graph is None:
+    global _graph, _graph_generation
+    gen = checkpointing.generation()
+    if _graph is None or _graph_generation != gen:
         _graph = build_graph(await checkpointing.get_checkpointer())
+        _graph_generation = gen
     return _graph
 
 def _fresh_state(messages: List[Dict[str, str]], agent_type: str) -> Dict[str, Any]:

@@ -169,3 +169,20 @@ def test_max_iters_guard():
     st["iters"] = MAX_ITERS
     out = asyncio.run(planner(st))
     assert out["pending_tool_calls"] == []
+
+
+def test_validate_calls_rejects_nan_inf_and_bool():
+    """数值卫生：NaN/inf 不得作为参数流向 Java（Jackson 默认拒绝非法数值），bool 不得
+    静默转成 1（int(True) 的 Python 坑）。"""
+    bads = [
+        {"tool": "create_purchase_order",
+         "args": {"supplier_id": 1, "sku_code": "SKU-A", "quantity": 1, "unit_price": float("nan")}},
+        {"tool": "create_purchase_order",
+         "args": {"supplier_id": 1, "sku_code": "SKU-A", "quantity": 1, "unit_price": float("inf")}},
+        {"tool": "create_purchase_order",
+         "args": {"supplier_id": 1, "sku_code": "SKU-A", "quantity": True, "unit_price": 1.0}},
+    ]
+    calls, dropped = G._validate_calls(bads)
+    assert calls == []
+    reasons = " ".join(d["reason"] for d in dropped)
+    assert reasons.count("bad-number") == 2 and "bad-integer" in reasons

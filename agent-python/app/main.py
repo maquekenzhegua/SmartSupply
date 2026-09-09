@@ -26,9 +26,12 @@ async def lifespan(_app: FastAPI):
             "SIDECAR_API_KEY 未配置：/api/reason* 无边车鉴权，任何可达 8001 端口的一方都可驱动 agent；"
             "生产/共享网络环境必须配置该密钥（Java 侧同配 AGENT_PYTHON_API_KEY）")
     yield
-    # 优雅关闭：checkpointer 走 Postgres 时释放连接池（MemorySaver 时为 no-op）
+    # 优雅关闭：checkpointer 走 Postgres 时释放连接池（MemorySaver 时为 no-op）；
+    # Java 回环共享连接池一并释放
     from . import checkpointing
+    from . import tools
     await checkpointing.aclose()
+    await tools.aclose_java_client()
 
 
 app = FastAPI(title="SmartSupply LangGraph Sidecar", version="2.1.0", lifespan=lifespan)
@@ -83,11 +86,15 @@ class RecallRequest(BaseModel):
 @app.get("/health")
 async def health():
     from . import prompts
+    from . import checkpointing
     return {"status": "ok", "ts": int(time.time()), "mode": "langgraph-react", "maxIters": MAX_ITERS,
             "tools": [t["name"] for t in TOOL_DEFS],
             "promptVersions": {"planner": prompts.PLANNER[0], "reflector": prompts.REFLECTOR[0]},
             "modelRouting": {"main": config.AI_MODEL, "fast": config.AI_MODEL_FAST},
             "runTokenBudget": config.RUN_TOKEN_BUDGET,
+            "runTimeoutSeconds": config.RUN_TIMEOUT_SECONDS,
+            # checkpointer 实际实现（非仅配置）：降级自愈状态在这里可见（运维探针）
+            "checkpointer": checkpointing.status(),
             "auth": {"sidecarApiKeyConfigured": bool(config.SIDECAR_API_KEY),
                      "serviceAccountConfigured": bool(config.JAVA_JWT_TOKEN or (config.SIDECAR_USERNAME and config.SIDECAR_PASSWORD))}}
 

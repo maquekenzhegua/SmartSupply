@@ -4,11 +4,13 @@ uvicorn==0.51.0
 pydantic==2.13.4
 httpx==0.28.1
 openai==2.50.0
-langchain==1.3.14
-langchain-core==1.6.0
 langgraph==1.2.10
 # interrupt 挂起状态持久化（CHECKPOINT_URI 配置后启用；缺省进程内 MemorySaver）
 langgraph-checkpoint-postgres==3.1.2
+# 直接 import 的传递依赖（app/checkpointing.py）：此前仅作为传递依赖隐式可用，
+# 上游收窄依赖范围即 ImportError；显式 pin 与环境实测版本一致
+psycopg[binary]==3.3.5
+psycopg-pool==3.3.1
 # 可观测性（可选）：未配置 LANGFUSE_* 时 observability 为 no-op，CI/离线零依赖。
 # 版本矩阵：SDK 2.x ↔ 自部署 Server v2（单容器）；Server v3（OTel 原生）才用 SDK 3.x
 langfuse==2.60.10

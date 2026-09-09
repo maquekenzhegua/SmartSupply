@@ -87,8 +87,8 @@
                 </div>
 
                 <div v-if="m.runId" class="feedback-row">
-                  <el-button link size="small" class="fb" @click="feedback(i, 1)">👍</el-button>
-                  <el-button link size="small" class="fb" @click="feedback(i, -1)">👎</el-button>
+                  <el-button link size="small" class="fb" aria-label="赞同这条回答" @click="feedback(i, 1)">👍</el-button>
+                  <el-button link size="small" class="fb" aria-label="反对这条回答" @click="feedback(i, -1)">👎</el-button>
                 </div>
               </div>
             </div>

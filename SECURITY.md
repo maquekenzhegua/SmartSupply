@@ -23,3 +23,9 @@ We aim to respond within 72 hours.
 
 The default login `admin / admin123` is for local demo and interview reproduction only.
 Do not expose it on a public instance. Override via environment variable or database.
+
+## 密钥卫生
+
+- 本地 `.env` 含真实形 API Key（明文）。它已被 .gitignore 排除且从未入 git；但请勿截图/粘贴分享。
+- 演示用的 OPENAI_API_KEY / Langfuse key 建议按季度轮换：轮换后只需更新 .env 并重启对应组件。
+- 生产环境一律经环境变量注入（compose `:?` 语法缺省即启动失败），不落盘进仓库。

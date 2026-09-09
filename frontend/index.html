@@ -3,6 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- CSP 基线：仅允许同源脚本/连接（ws: 供 dev HMR），样式放行内联（Element Plus 运行时注入）；
+         模型输出经前端转义 + marked 渲染，CSP 作为注入的最后一道兜底 -->
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws:; object-src 'none'; base-uri 'self'; frame-ancestors 'self'" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%232563eb'/%3E%3Ctext x='50' y='68' font-size='52' text-anchor='middle' fill='white' font-family='sans-serif'%3ES%3C/text%3E%3C/svg%3E" />
     <title>SmartSupply 智能供应链</title>
   </head>
   <body>

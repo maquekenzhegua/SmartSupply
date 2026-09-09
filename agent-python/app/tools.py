@@ -76,38 +76,61 @@ def _headers(token: str = "") -> Dict[str, str]:
     return h
 
 
-async def _java_request(client, method: str, url: str, params, json_body):
+async def _java_request(client, method: str, url: str, params, json_body, timeout_s: float = None):
     """单次回环请求：用户透传 token 优先，缺失则取/刷新服务账号 token。"""
     tok = _auth_token()
     if not tok:
         tok = await _ensure_service_token()
-    r = await client.request(method, url, params=params, json=json_body, headers=_headers(tok))
+    r = await client.request(method, url, params=params, json=json_body, headers=_headers(tok), timeout=timeout_s)
     if r.status_code in (401, 403) and not _token_var.get("") and not config.JAVA_JWT_TOKEN:
         # 服务账号 token 可能过期：清缓存重登一次再试
         global _svc_token
         _svc_token = ""
         tok = await _ensure_service_token()
-        r = await client.request(method, url, params=params, json=json_body, headers=_headers(tok))
+        r = await client.request(method, url, params=params, json=json_body, headers=_headers(tok), timeout=timeout_s)
     return r
+
+# 共享回环连接池：此前每次工具调用新建 AsyncClient，每个工具一次 TCP 握手、句柄浪费
+# （llm 层已为此修过共享池，Java 回环侧同样处理）。uvicorn 单事件循环内复用，
+# shutdown 时经 aclose_java_client() 释放。
+_shared_java_client: Optional[httpx.AsyncClient] = None
+
+
+def _java_client() -> httpx.AsyncClient:
+    global _shared_java_client
+    if _shared_java_client is None or _shared_java_client.is_closed:
+        _shared_java_client = httpx.AsyncClient(trust_env=False)
+    return _shared_java_client
+
+
+async def aclose_java_client() -> None:
+    global _shared_java_client
+    if _shared_java_client is not None:
+        try:
+            await _shared_java_client.aclose()
+        except Exception:
+            pass
+    _shared_java_client = None
+
 
 async def call_java_tool(path: str, method: str = "GET", params: Dict[str, Any] = None, json: Dict[str, Any] = None,
                          timeout_s: float = 8.0) -> Any:
     """调用 Java 只读 API。成功返回解包后的 data；任何非 200 返回 {"error", "auth_failed"}，
     连接层异常直接抛出（由 tool_* 统一转成 ok=False 错误信封）。
     trust_env=False：内网回环绝不经系统代理（Windows 上 httpx 会经 getproxies() 读
-    WinINET 注册表代理，把 localhost:8080 送进代理后拿到裸 502——实跑踩坑）。"""
+    WinINET 注册表代理，把 localhost:8080 送进代理后拿到裸 502——实跑踩坑）。
+    超时按调用预算逐请求生效（共享 client 不绑定单次超时）。"""
     url = f"{config.JAVA_API_BASE.rstrip('/')}{path}"
-    async with httpx.AsyncClient(timeout=timeout_s, trust_env=False) as client:
-        r = await _java_request(client, method, url, params, json)
-        if r.status_code != 200:
-            return {"error": f"Java API {r.status_code}: {r.text[:500]}", "auth_failed": r.status_code in (401, 403)}
-        try:
-            data = r.json()
-        except Exception:
-            return {"raw": r.text[:1000]}
-        if isinstance(data, dict) and "data" in data:
-            return data["data"]
-        return data
+    r = await _java_request(_java_client(), method, url, params, json, timeout_s=timeout_s)
+    if r.status_code != 200:
+        return {"error": f"Java API {r.status_code}: {r.text[:500]}", "auth_failed": r.status_code in (401, 403)}
+    try:
+        data = r.json()
+    except Exception:
+        return {"raw": r.text[:1000]}
+    if isinstance(data, dict) and "data" in data:
+        return data["data"]
+    return data
 
 
 def _err(tool: str, message: str, auth_failed: bool = False) -> Dict[str, Any]:

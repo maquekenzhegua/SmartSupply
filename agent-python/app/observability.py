@@ -38,7 +38,7 @@ def client():
                 host=config.LANGFUSE_HOST or "http://localhost:3000",
             )
         except Exception as e:
-            print(f"[observability] Langfuse 客户端构造失败，本次进程禁用埋点: {e}")
+            logging.getLogger(__name__).warning("Langfuse 客户端构造失败，本次进程禁用埋点: %s", e)
             _client_failed = True
             return None
     return _client
