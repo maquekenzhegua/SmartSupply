@@ -148,18 +148,30 @@ jobs:
           python-version: '3.11'
           cache: pip
           cache-dependency-path: agent-python/requirements.txt
+      # 脚本内部以 agent-python 为根解析相对路径（llm_judge.py:277 把 --out 拼到 ROOT 下），
+      # 必须用 working-directory + docs/ 相对路径——从仓库根传 "agent-python/docs/..."
+      # 会被写成 agent-python/agent-python/docs/，check_gate 读不到报告而 GATE FAIL（已踩坑）
       - name: Offline golden eval (mock = smoke baseline)
+        working-directory: agent-python
         run: |
           python -m pip install --upgrade pip
-          pip install -r agent-python/requirements.txt
-          python -m pytest agent-python/tests/test_golden_eval.py::test_offline_recall_and_answer_keyword_coverage agent-python/tests/test_golden_eval.py::test_golden_count -v
-          python -m pytest agent-python/tests/test_agent_eval.py -v
-          python agent-python/scripts/llm_judge.py --mode mock --recall bigram --out agent-python/docs/eval-report-mock-ci.md
+          pip install -r requirements.txt
+          python -m pytest tests/test_golden_eval.py::test_offline_recall_and_answer_keyword_coverage tests/test_golden_eval.py::test_golden_count -v
+          python -m pytest tests/test_agent_eval.py -v
+          python scripts/llm_judge.py --mode mock --recall bigram --out docs/eval-report-mock-ci.md
           # 数值门禁：解析报告指标并与阈值比较（不再是无判定的 grep）
-          python agent-python/scripts/check_gate.py agent-python/docs/eval-report-mock-ci.md --min-hit 0.6
+          python scripts/check_gate.py docs/eval-report-mock-ci.md --min-hit 0.6
           # trajectory 评测：工具调用序列 vs golden 期望（评"调对工具"，与答案质量互补）
-          python agent-python/scripts/eval_trajectory.py --mode mock --out agent-python/docs/eval-trajectory-mock-ci.md --min-f1 0.9
-          python agent-python/scripts/check_gate.py agent-python/docs/eval-trajectory-mock-ci.md --min-tool-f1 0.9
+          python scripts/eval_trajectory.py --mode mock --out docs/eval-trajectory-mock-ci.md --min-f1 0.9
+          python scripts/check_gate.py docs/eval-trajectory-mock-ci.md --min-tool-f1 0.9
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-report-mock
+          path: |
+            agent-python/docs/eval-report-mock-ci.md
+            agent-python/docs/eval-trajectory-mock-ci.md
+          retention-days: 14
 
   real-eval:
     runs-on: ubuntu-latest
@@ -184,11 +196,14 @@ jobs:
           # golden 集真实模型评测 + LLM-as-judge，产出带真实指标的报告
           python -m pytest tests/test_golden_eval.py -v -m real_llm
           python scripts/llm_judge.py --mode real --recall bigram --out docs/eval-report-real-ci.md
-          python scripts/check_gate.py docs/eval-report-real-ci.md --min-hit 0.6
+          # llm_judge 内部已默认 faith>=1.2 门禁；此处为报告解析层的双保险
+          python scripts/check_gate.py docs/eval-report-real-ci.md --min-hit 0.6 --min-faithfulness 1.2
           # trajectory（真实模型）：信息性收集（真实模型规划可合理偏离 golden 关键词口径，暂不设门禁）
           python scripts/eval_trajectory.py --mode real --out docs/eval-trajectory-real-ci.md
       - uses: actions/upload-artifact@v4
         with:
           name: eval-report-real
-          path: agent-python/docs/eval-report-real-ci.md
+          path: |
+            agent-python/docs/eval-report-real-ci.md
+            agent-python/docs/eval-trajectory-real-ci.md
           retention-days: 30

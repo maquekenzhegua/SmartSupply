@@ -16,7 +16,7 @@ import pathlib
 
 METRIC_PATTERNS = {
     "hit": r"avg_keyword_hit:\s*([0-9.]+)",
-    "evidence": r"avg_evidence_recall(?:\(证据进top-k\))?:\s*([0-9.]+)",
+    "evidence": r"avg_evidence_recall(?:\([^)]*\))?:\s*([0-9.]+)",
     "faithfulness": r"avg_faithfulness(?:\(0-2\))?:\s*([0-9.]+)",
     "relevance": r"avg_relevance(?:\(0-2\))?:\s*([0-9.]+)",
     "tool_f1": r"avg_tool_f1:\s*([0-9.]+)",

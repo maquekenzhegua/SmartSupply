@@ -33,7 +33,8 @@ def main() -> int:
             continue  # 表头
         if line.startswith("|---"):
             continue
-        m = re.match(r"\| (\d+) \| (.+) \| ([0-9.]+) \| (\d) \| (\d) \| (\d) \|", line)
+        # evid/faith/relev 允许 "—"（judge 失败样本），保留进汇总表并单独计数，不再静默剔除
+        m = re.match(r"\| (\d+) \| (.+) \| ([0-9.]+) \| ([0-9.]+|—) \| ([0-9.]+|—) \| ([0-9.]+|—) \|", line)
         if m:
             table_rows.append((m.group(1), m.group(2), m.group(3), m.group(4), m.group(5), m.group(6)))
             continue
@@ -42,7 +43,7 @@ def main() -> int:
             continue
         if in_fails:
             # 只接受严格的失败样本格式，丢弃模型多行答案的续行（防止原始答案混入汇总）
-            fm = re.match(r"^- (.+?) => hit=([0-9.]+) evid=(\d) fh=(\d) rel=(\d)(?: \| .*)?$", line)
+            fm = re.match(r"^- (.+?) => hit=([0-9.]+) evid=([0-9.]+|—) fh=([0-9.]+|—) rel=([0-9.]+|—)(?: \| .*)?$", line)
             if fm:
                 fails.append(f"{fm.group(1)} (hit={fm.group(2)} evid={fm.group(3)} fh={fm.group(4)} rel={fm.group(5)})")
             continue
@@ -52,13 +53,13 @@ def main() -> int:
     # 头部清洗：去掉原始报告中的标题日期行，重建
     metrics = {}
     for key, pat in {
-        "model": r"- 模型: (.+)",
+        "model": r"- 模型(?:（答题）)?: (.+)",
         "n": r"- 样本数: (\d+)",
         "recall": r"- 召回策略: (.+)",
         "hit": r"- avg_keyword_hit: ([0-9.]+)",
-        "evidence": r"- avg_evidence_recall(?:\(证据进top-k\))?: ([0-9.]+)",
-        "faithfulness": r"- avg_faithfulness(?:\(0-2\))?: ([0-9.]+)",
-        "relevance": r"- avg_relevance(?:\(0-2\))?: ([0-9.]+)",
+        "evidence": r"- avg_evidence_recall(?:\([^)]*\))?: ([0-9.]+)",
+        "faithfulness": r"- avg_faithfulness(?:\([^)]*\))?: ([0-9.]+)",
+        "relevance": r"- avg_relevance(?:\([^)]*\))?: ([0-9.]+)",
     }.items():
         m = re.search(pat, text)
         if m:
@@ -89,6 +90,10 @@ def main() -> int:
     out.append("")
     full_hits = sum(1 for _, _, h, _, _, _ in table_rows if h == "1.00")
     out.append(f"- 满分题（must_hit=1.00）：{full_hits}/{len(table_rows)}")
+    judge_failed = sum(1 for _, _, _, _, fh, _ in table_rows if fh == "—")
+    if judge_failed:
+        out.append(f"- judge 失败题（faith/relevance 无评分，表中以—计）：{judge_failed} 题，"
+                   f"已计入上表逐题行；失败原因与原始输出见完整报告")
     out.append("")
     if fails:
         out.append(f"## 失败/部分失败样本（{len(fails)}）")

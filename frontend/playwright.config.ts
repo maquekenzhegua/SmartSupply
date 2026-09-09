@@ -11,14 +11,15 @@ export default defineConfig({
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? [['github'], ['html', { open: 'never' }]] : 'list',
   use: {
-    baseURL: process.env.E2E_BASE_URL || 'http://localhost:3000',
+    // dev 端口固定 3001（3000 被 langfuse 占用，package.json dev 脚本同源约定）
+    baseURL: process.env.E2E_BASE_URL || 'http://localhost:3001',
     trace: 'retain-on-failure',
   },
   webServer: process.env.E2E_BASE_URL
     ? undefined // CI 已另行起好前端
     : {
         command: 'npm run dev',
-        url: 'http://localhost:3000',
+        url: 'http://localhost:3001',
         reuseExistingServer: true,
         timeout: 120_000,
       },
