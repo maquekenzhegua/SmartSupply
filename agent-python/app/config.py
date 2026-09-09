@@ -63,6 +63,10 @@ def _getattr_impl(name: str):
     # ReAct 最大迭代轮数：此前硬编码 6，轮数与成本/延迟直接相关，应可按环境调整
     if name == "MAX_ITERATIONS":
         return int(_get("MAX_ITERATIONS", "6"))
+    # 单次运行死线（秒）：0=不限。非流式 ainvoke 与 SSE 消费循环共用；到点取消图执行，
+    # 防失控成本/断连后后台持续烧 LLM（Java 侧 blocking-timeout-ms 是另一层外边界）
+    if name == "RUN_TIMEOUT_SECONDS":
+        return float(_get("RUN_TIMEOUT_SECONDS", "360"))
     # Langfuse 可观测性：不配置即整体禁用（observability 返回 no-op，零依赖零开销）
     if name == "LANGFUSE_PUBLIC_KEY":
         return _get("LANGFUSE_PUBLIC_KEY", "")

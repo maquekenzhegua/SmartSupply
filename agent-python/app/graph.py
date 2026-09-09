@@ -11,8 +11,11 @@
 - 模型路由（成本分级）：planner/reflector 走廉价档 AI_MODEL_FAST，reasoner 走主模型；
   全节点用量按模型累计进 usage_total.by_model（真实回传优先，估算显式标注），随响应/
   done 事件上报，Java 侧按模型查价格表计成本。
-- 单次运行预算：RUN_TOKEN_BUDGET / AGENT_TOKEN_BUDGETS（按 agent_type 覆盖），planner
-  每轮检查，超限不再调 LLM 提前收敛作答（budget_exhausted 如实标注，不算 degraded）。
+- 单次运行预算：RUN_TOKEN_BUDGET / AGENT_TOKEN_BUDGETS（按 agent_type 覆盖），planner 与
+  reflector 每轮检查（调 LLM 前后各一次），超限不再调 LLM 提前收敛作答（budget_exhausted
+  如实标注，不算 degraded）；MAX_ITERS 同样每轮生效，reflector 负责推进 iters。
+- 单次运行死线：RUN_TIMEOUT_SECONDS（默认 360s，0=不限）兜底非流式与 SSE 路径的失控
+  执行；SSE 消费方断连即取消图任务，不再后台烧 LLM。
 - agent_type 差异化：AGENT_TOOLSETS 定义各角色允许工具（bi 严格只读），tool_specs 过滤
   可见工具 + _validate_calls 拦越权调用（tool-not-allowed-for-agent）。
 - 人设来源：messages[0] 的 system（Java PromptRegistry，DB 发布即生效）优先，否则
@@ -48,8 +51,24 @@ from .tools import (
 )
 
 # ReAct 最大迭代轮数：可经 MAX_ITERATIONS 环境变量调整（默认 6）。轮数直接决定
-# 取证深度与 token 成本上限，不应硬编码；planner/reflector 每轮推进 iters 并在此封顶。
+# 取证深度与 token 成本上限。注意必须每次调用时读取（_max_iters）——import 时快照
+# 会让 env 变更与测试 monkeypatch 失效；模块常量仅为 /health 兼容保留。
 MAX_ITERS = max(1, int(getattr(config, "MAX_ITERATIONS", 6) or 6))
+
+
+def _max_iters() -> int:
+    try:
+        return max(1, int(getattr(config, "MAX_ITERATIONS", 6) or 6))
+    except (TypeError, ValueError):
+        return 6
+
+
+def _run_timeout_seconds() -> float:
+    """单次运行死线（秒），0=不限：到点取消图执行，防失控成本/后台烧钱。"""
+    try:
+        return max(0.0, float(getattr(config, "RUN_TIMEOUT_SECONDS", 360) or 0))
+    except (TypeError, ValueError):
+        return 360.0
 
 # 写工具集合：图内单独节点执行，执行前 interrupt() 挂起等人工批准（HITL 决策层）。
 # 执行层的权限/幂等/校验仍在 Java 可信层（ADMIN 角色 + 幂等键 + DRAFT 状态）。
@@ -173,7 +192,19 @@ def _validate_calls(raw_calls: List[Dict[str, Any]], allowed: Optional[set] = No
     if len(valid) > 4:
         dropped.append({"call": f"{len(valid) - 4} call(s)", "reason": "over-batch-limit:max4"})
         valid = valid[:4]
-    return valid, dropped
+    # 每批至多 1 个写调用（HITL 串行语义）：写工具在 write_tools 节点逐个 interrupt()，
+    # 多写同批会让节点重放时重复执行已批准的写（实测 Java 端收到 [S1,S1,S2]）。
+    # 限一后被限掉的写由 reflector 下一轮重规划（未执行者不在去重集），每个写各过一道人工批准。
+    write_seen = False
+    capped: List[Dict[str, Any]] = []
+    for c in valid:
+        if c["tool"] in WRITE_TOOLS:
+            if write_seen:
+                dropped.append({"call": c["tool"], "reason": "over-write-batch-limit:1"})
+                continue
+            write_seen = True
+        capped.append(c)
+    return capped, dropped
 
 
 def _extract_json_array(text: str) -> Optional[List[Any]]:
@@ -305,7 +336,7 @@ async def _plan_calls(prompt_system: str, task_hint: str, history: List[Dict[str
 
 async def planner(state: AgentState) -> Dict[str, Any]:
     iters = int(state.get("iters") or 0)
-    if iters >= MAX_ITERS:
+    if iters >= _max_iters():
         return {"pending_tool_calls": []}
     trace = list(state.get("trace") or [])
     msgs = list(state.get("messages") or [])
@@ -439,13 +470,24 @@ async def write_tools(state: AgentState) -> Dict[str, Any]:
 
 async def reflector(state: AgentState) -> Dict[str, Any]:
     iters = int(state.get("iters") or 0)
-    if iters >= MAX_ITERS:
+    if iters >= _max_iters():
         return {"pending_tool_calls": []}
     trace = list(state.get("trace") or [])
     msgs = list(state.get("messages") or [])
     last = msgs[-1]["content"] if msgs else ""
     tool_results = state.get("tool_results") or []
     agent_type = state.get("agent_type") or "general"
+
+    # 预算闸门（每轮生效）之【查一轮】：调 LLM 前先看上一轮累计用量，超限直接收口不再调模型。
+    # 此前预算只在入口 planner 判一次——彼时 usage_total 恒为空，budget_exhausted 永远为 False，
+    # 是一段不可达的死代码（测试靠手工向 state 注入用量才测通），真实模型下成本/延迟无硬闸。
+    limit = _budget_for(agent_type)
+    used = _used_tokens(state.get("usage_total"))
+    if limit > 0 and used >= limit:
+        entry: Dict[str, Any] = {"node": "reflector", "provider": "budget-gate", "calls": [],
+                                 "budget": {"limit": limit, "used": used, "action": "stop_collecting"}}
+        trace.append(entry)
+        return {"pending_tool_calls": [], "trace": trace, "budget_exhausted": True, "budget": entry["budget"]}
 
     persona_text, persona_source = _persona_system(msgs, agent_type)
     system_prompt = persona_text + "\n\n" + prompts_mod.REFLECTOR[1]
@@ -456,15 +498,27 @@ async def reflector(state: AgentState) -> Dict[str, Any]:
         [{"tool": r.get("tool"), "args": r.get("args"), "ok": r.get("ok")} for r in tool_results],
         agent_type)
     usage_total = _accumulate_usage(state.get("usage_total"), config.AI_MODEL_FAST, usage_delta)
-    filtered = [c for c in calls
-                if (c["tool"], json.dumps(c["args"], ensure_ascii=False, sort_keys=True)) not in done]
-    entry: Dict[str, Any] = {"node": "reflector", "provider": provider, "calls": filtered[:3]}
+    # 预算闸门之【查二轮】：本轮反思调用本身也消耗预算，超限即收口（不再进 tools），
+    # budget_exhausted 如实标注——reasoner 收到"可能不完整"提示，不算 degraded
+    exhausted_now = limit > 0 and _used_tokens(usage_total) >= limit
+    filtered = [] if exhausted_now else [c for c in calls
+                                         if (c["tool"], json.dumps(c["args"], ensure_ascii=False, sort_keys=True)) not in done]
+    entry = {"node": "reflector", "provider": provider, "calls": filtered[:3]}
     if note:
         entry["note"] = note
+    if exhausted_now:
+        entry["budget"] = {"limit": limit, "used": _used_tokens(usage_total), "action": "stop_collecting"}
     trace.append(entry)
     obs.span(_obs_trace.get(), "reflector", input={"tool_results": len(tool_results)},
              output={"calls": filtered[:3], "provider": provider}, metadata={"node": "reflector"})
-    update: Dict[str, Any] = {"pending_tool_calls": filtered[:3], "trace": trace, "usage_total": usage_total}
+    # iters 必须由 reflector 推进：此前只有入口 planner 执行一次 iters+1，reflector 循环
+    # 里 iters 恒为 1，MAX_ITERS 对 reflector↔tools 循环完全失效（模型持续规划新参数
+    # 调用即可无限循环、无限烧钱——实测桩驱动 4 秒不终止）
+    update: Dict[str, Any] = {"pending_tool_calls": filtered[:3], "trace": trace,
+                              "usage_total": usage_total, "iters": iters + 1}
+    if exhausted_now:
+        update["budget_exhausted"] = True
+        update["budget"] = entry["budget"]
     if provider in ("unavailable", "error"):
         update.update({"degraded": True, "degrade_reason": f"反思阶段 LLM 不可用: {note or provider}"})
     return update
@@ -577,7 +631,7 @@ async def reasoner(state: AgentState) -> Dict[str, Any]:
 def should_continue_after_reflect(state: AgentState) -> Literal["tools", "reason"]:
     calls = state.get("pending_tool_calls") or []
     iters = int(state.get("iters") or 0)
-    if calls and iters < MAX_ITERS and not state.get("budget_exhausted"):
+    if calls and iters < _max_iters() and not state.get("budget_exhausted"):
         return "tools"
     return "reason"
 
@@ -642,6 +696,21 @@ def _extract_interrupts(values: Dict[str, Any]) -> List[Dict[str, Any]]:
     return out
 
 
+def _has_pending_interrupt(snap: Any) -> bool:
+    """挂起判定：终态挂起在 values["__interrupt__"]；但"批量写批准第一个、第二个又挂起"
+    的第二次挂起位于 tasks[*].interrupts（snap.next 为空、values 无 __interrupt__）。
+    只查前两处会把该场景误判为"无挂起"而拒绝恢复——第二个写永远无法经人工批准执行。"""
+    if getattr(snap, "next", None):
+        return True
+    values = getattr(snap, "values", None) or {}
+    if values.get("__interrupt__"):
+        return True
+    for t in (getattr(snap, "tasks", None) or ()):
+        if getattr(t, "interrupts", None):
+            return True
+    return False
+
+
 async def run_reasoning(messages: List[Dict[str, str]], agent_type: str = "general") -> str:
     g = await get_graph()
     result = await g.ainvoke(_fresh_state(messages, agent_type),
@@ -659,7 +728,12 @@ async def run_reasoning_with_trace(messages: List[Dict[str, str]], agent_type: s
                                 (messages[-1]["content"] if messages else "")[:500])
     token = _obs_trace.set(trace_obj)
     try:
-        result = await (await get_graph()).ainvoke(dict(state), config={"configurable": {"thread_id": tid}})
+        # 运行死线：Java 侧 blocking-timeout-ms=300s 是外层边界，这里兜住"边车直调/非流式"
+        # 路径的失控执行；超时异常经 API 层以 degraded 收口
+        timeout = _run_timeout_seconds() or None
+        result = await asyncio.wait_for(
+            (await get_graph()).ainvoke(dict(state), config={"configurable": {"thread_id": tid}}),
+            timeout=timeout)
     finally:
         _obs_trace.reset(token)
     if result.get("__interrupt__"):
@@ -685,7 +759,7 @@ async def resume_reasoning(thread_id: str, resume_value: Any, agent_type: str = 
     cfg = {"configurable": {"thread_id": thread_id}}
     g = await get_graph()
     snap = await g.aget_state(cfg)
-    if not (snap.next or (snap.values or {}).get("__interrupt__")):
+    if not _has_pending_interrupt(snap):
         # 无挂起中断（边车重启丢 checkpoint / 重复恢复）：如实报错，绝不伪造执行成功
         return {"reply": "", "trace": [], "tool_results": [], "iters": 0, "degraded": True,
                 "degrade_reason": "no_pending_interrupt: 挂起状态不存在（可能边车已重启），请重新发起请求",
@@ -695,7 +769,9 @@ async def resume_reasoning(thread_id: str, resume_value: Any, agent_type: str = 
                                 str((state.get("messages") or [{}])[-1].get("content", ""))[:500])
     token = _obs_trace.set(trace_obj)
     try:
-        result = await g.ainvoke(Command(resume=resume_value), config=cfg)
+        result = await asyncio.wait_for(
+            g.ainvoke(Command(resume=resume_value), config=cfg),
+            timeout=_run_timeout_seconds() or None)
     finally:
         _obs_trace.reset(token)
     if result.get("__interrupt__"):
@@ -736,7 +812,7 @@ async def stream_reasoning_events(messages: List[Dict[str, str]], agent_type: st
     g = await get_graph()
     if resuming:
         snap = await g.aget_state(cfg)
-        if not (snap.next or (snap.values or {}).get("__interrupt__")):
+        if not _has_pending_interrupt(snap):
             yield {"event": "done", "degraded": True,
                    "degrade_reason": "no_pending_interrupt: 挂起状态不存在（可能边车已重启），请重新发起请求",
                    "iters": 0, "tools": [], "thread_id": thread_id, "interrupted": False}
@@ -751,8 +827,11 @@ async def stream_reasoning_events(messages: List[Dict[str, str]], agent_type: st
         graph_input = dict(state)
         thread_id = tid
     queue: asyncio.Queue = asyncio.Queue()
-    emitted_tools = 0
-    emitted_writes = len(state.get("tool_results") or [])
+    # 已发事件游标：恢复时从 checkpoint 状态长度起算（历史结果已在上一条连接发出）。
+    # 此前 emitted_tools 恒为 0，恢复后 tools 节点的全量 results 会把历史条目（含已执行的
+    # 写操作）以 tool 事件错标重发；读写共用同一游标是因为两个节点向同一条 tool_results
+    # 列表追加，游标语义统一为"列表中前 N 条已发出"。
+    emitted = len(state.get("tool_results") or [])
     reply_emitted = 0
     interrupted = False
     confirm_payloads: List[Dict[str, Any]] = []
@@ -767,7 +846,7 @@ async def stream_reasoning_events(messages: List[Dict[str, str]], agent_type: st
     obs_token = _obs_trace.set(trace_obj)
 
     async def _drive() -> None:
-        nonlocal emitted_tools, emitted_writes, reply_emitted, interrupted
+        nonlocal emitted, reply_emitted, interrupted
         try:
             async for chunk in g.astream(graph_input, config=cfg, stream_mode="updates"):
                 if "__interrupt__" in (chunk or {}):
@@ -790,22 +869,22 @@ async def stream_reasoning_events(messages: List[Dict[str, str]], agent_type: st
                                           "provider": str(trace[-1].get("provider", "")) if trace else ""})
                     elif node == "tools":
                         results = update.get("tool_results") or []
-                        for r in results[emitted_tools:]:
+                        for r in results[emitted:]:
                             ev = {"event": "tool", "tool": r.get("tool"), "args": r.get("args"), "ok": r.get("ok")}
                             if not r.get("ok") and isinstance(r.get("result"), dict):
                                 ev["error"] = str(r["result"].get("error"))[:200]
                             queue.put_nowait(ev)
-                        emitted_tools = len(results)
+                        emitted = len(results)
                     elif node == "write_tools":
                         results = update.get("tool_results") or []
-                        for r in results[emitted_writes:]:
+                        for r in results[emitted:]:
                             ev = {"event": "write_tool", "tool": r.get("tool"), "args": r.get("args"), "ok": r.get("ok")}
                             if isinstance(r.get("result"), dict) and r["result"].get("user_rejected"):
                                 ev["rejected"] = True
                             if not r.get("ok") and isinstance(r.get("result"), dict):
                                 ev["error"] = str(r["result"].get("error"))[:200]
                             queue.put_nowait(ev)
-                        emitted_writes = len(results)
+                        emitted = len(results)
                     elif node == "reflector":
                         trace = update.get("trace") or []
                         queue.put_nowait({"event": "reflect", "calls": update.get("pending_tool_calls") or [],
@@ -824,9 +903,20 @@ async def stream_reasoning_events(messages: List[Dict[str, str]], agent_type: st
 
     _reply_sink.set(_sink)  # 必须在 driver task 创建前设置：task 继承创建时的 contextvars 快照
     driver = asyncio.create_task(_drive())
+    run_deadline: Optional[float] = None
+    _timeout = _run_timeout_seconds()
+    if _timeout > 0:
+        run_deadline = asyncio.get_running_loop().time() + _timeout
+    timed_out = False
     try:
         while True:
-            item = await queue.get()
+            try:
+                remaining = None if run_deadline is None else max(
+                    0.05, run_deadline - asyncio.get_running_loop().time())
+                item = await asyncio.wait_for(queue.get(), timeout=remaining)
+            except asyncio.TimeoutError:
+                timed_out = True
+                break
             if item is None:
                 break
             if "__error__" in item:
@@ -837,9 +927,25 @@ async def stream_reasoning_events(messages: List[Dict[str, str]], agent_type: st
                 await driver
                 return
             yield item
+    except (GeneratorExit, asyncio.CancelledError):
+        # 消费方断连（生成器被关闭）或被取消：必须取消 driver——图在后台继续跑完会
+        # 白白烧掉 LLM 调用与 token（客户端早已离开）。Checkpoint 语义按 superstep 落库，
+        # 中途取消不会留下半写状态；写操作若已在 Java 侧执行由幂等键兜底。
+        if not driver.done():
+            driver.cancel()
+        raise
     finally:
         _obs_trace.reset(obs_token)
         _reply_sink.set(None)
+    if timed_out:
+        if not driver.done():
+            driver.cancel()
+        yield {"event": "done", "degraded": True,
+               "degrade_reason": f"run_timeout: 单次运行超过 {_timeout:.0f}s，已中止执行",
+               "iters": int(state.get("iters") or 0),
+               "tools": [t.get("tool") for t in (state.get("tool_results") or [])],
+               "thread_id": thread_id, "interrupted": False}
+        return
     await driver
     done: Dict[str, Any] = {"event": "done", "degraded": bool(state.get("degraded")),
                             "degrade_reason": state.get("degrade_reason") or "",
