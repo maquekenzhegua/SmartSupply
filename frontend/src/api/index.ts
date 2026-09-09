@@ -48,4 +48,11 @@ export const api = {
   adminCreatePrompt: (body: Record<string, unknown>) => request.post('/admin/agent/prompts', body).then(r => r.data.data || r.data),
   adminActivatePrompt: (id: number) => request.post(`/admin/agent/prompts/${id}/activate`).then(r => r.data.data || r.data),
   adminEval: () => request.get('/admin/agent/eval').then(r => r.data.data || r.data),
+  adminEvalCandidates: (params?: Record<string, unknown>) => request.get('/admin/agent/eval/candidates', { params }).then(r => r.data.data || r.data),
+  adminEvalSnapshots: (params?: Record<string, unknown>) => request.get('/admin/agent/eval/snapshots', { params }).then(r => r.data.data || r.data),
+  adminPostEvalSnapshot: (body: Record<string, unknown>) => request.post('/admin/agent/eval/snapshots', body).then(r => r.data.data || r.data),
+  adminPromptsEffective: () => request.get('/admin/agent/prompts/effective').then(r => r.data.data || r.data),
+  // 候选导出走 blob：需要带鉴权头的 axios 实例，window.open 会丢 JWT
+  adminExportEvalCandidates: (params?: Record<string, unknown>) =>
+    request.get('/admin/agent/eval/candidates/export', { params, responseType: 'blob' }).then(r => r.data),
 }

@@ -1,29 +1,36 @@
 <template>
-  <div>
-    <el-card>
-      <template #header>
-        <div style="display: flex; justify-content: space-between"><span>采购单</span><el-button type="primary" @click="openCreate">新建采购单</el-button></div>
-      </template>
+  <div class="page">
+    <div class="page-header">
+      <div class="titles">
+        <h1 class="page-title">采购单</h1>
+        <p class="page-desc">创建、审批到入库的全流程，点击行查看明细</p>
+      </div>
+      <div class="actions">
+        <el-button type="primary" :icon="Plus" @click="openCreate">新建采购单</el-button>
+      </div>
+    </div>
+
+    <el-card class="list-card" shadow="never">
       <el-table v-loading="loading" :data="rows" @row-click="viewDetail">
         <el-table-column prop="order_no" label="单号" width="160" />
         <el-table-column prop="supplier_name" label="供应商" min-width="140" />
-        <el-table-column prop="status" label="状态" width="110"><template #default="{ row }"><el-tag :type="statusType(row.status as string)">{{ row.status }}</el-tag></template></el-table-column>
+        <el-table-column prop="status" label="状态" width="110"><template #default="{ row }"><el-tag :type="statusType(row.status as string)" effect="light" round>{{ row.status }}</el-tag></template></el-table-column>
         <el-table-column prop="total_amount" label="金额" width="110" />
         <el-table-column prop="created_at" label="创建时间" width="170" />
         <el-table-column label="操作" width="200">
           <template #default="{ row }">
             <el-button size="small" @click.stop="viewDetail(row)">详情</el-button>
-            <el-button v-if="row.status==='DRAFT'" size="small" @click.stop="changeStatus(row, 'APPROVED')">审核</el-button>
-            <el-button size="small" type="danger" @click.stop="remove(row)">删除</el-button>
+            <el-button v-if="row.status==='DRAFT'" size="small" type="primary" plain @click.stop="changeStatus(row, 'APPROVED')">审核</el-button>
+            <el-button size="small" type="danger" plain @click.stop="remove(row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
-      <el-pagination v-model:current-page="page" style="margin-top:12px; justify-content:flex-end" :page-size="size" :total="total" layout="prev, pager, next" @current-change="load" />
+      <el-pagination v-model:current-page="page" class="pager" :page-size="size" :total="total" layout="prev, pager, next" @current-change="load" />
     </el-card>
 
     <el-dialog v-model="detailVisible" title="采购单详情" width="640px">
       <div v-if="detail">
-        <p>单号：{{ detail.order_no }} | 状态：{{ detail.status }} | 金额：{{ detail.total_amount }}</p>
+        <p class="detail-meta">单号：{{ detail.order_no }} | 状态：{{ detail.status }} | 金额：{{ detail.total_amount }}</p>
         <el-table :data="(detail.items as Record<string, unknown>[]) || []">
           <el-table-column prop="sku_code" label="SKU" /><el-table-column prop="quantity" label="数量" /><el-table-column prop="unit_price" label="单价" /><el-table-column prop="amount" label="小计" />
         </el-table>
@@ -35,8 +42,8 @@
         <el-form-item label="供应商ID"><el-input v-model="form.supplierId" type="number" placeholder="先在供应商页查看ID" /></el-form-item>
         <el-form-item label="备注"><el-input v-model="form.remark" /></el-form-item>
         <el-form-item label="明细">
-          <div v-for="(it, idx) in form.items" :key="idx" style="display:flex; gap:8px; margin-bottom:8px">
-            <el-input v-model="it.skuId" placeholder="SKU ID" style="width:100px" /><el-input v-model="it.quantity" placeholder="数量" style="width:100px" /><el-input v-model="it.unitPrice" placeholder="单价" style="width:100px" /><el-button size="small" type="danger" @click="form.items.splice(idx,1)">删</el-button>
+          <div v-for="(it, idx) in form.items" :key="idx" class="po-item">
+            <el-input v-model="it.skuId" placeholder="SKU ID" style="width:100px" /><el-input v-model="it.quantity" placeholder="数量" style="width:100px" /><el-input v-model="it.unitPrice" placeholder="单价" style="width:100px" /><el-button size="small" type="danger" plain @click="form.items.splice(idx,1)">删</el-button>
           </div>
           <el-button size="small" @click="form.items.push({ skuId:'', quantity:1, unitPrice:0 })">添加一行</el-button>
         </el-form-item>
@@ -50,6 +57,7 @@
 import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '@/api'
+import { Plus } from '@element-plus/icons-vue'
 const rows = ref<Record<string, unknown>[]>([]), loading = ref(false)
 const page = ref(1), size = ref(10), total = ref(0)
 const detailVisible = ref(false), detail = ref<Record<string, unknown> | null>(null)
@@ -78,3 +86,18 @@ async function remove(row: Record<string, unknown>) {
 }
 onMounted(load)
 </script>
+
+<style scoped>
+.detail-meta {
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: var(--ink-600);
+}
+
+.po-item {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+  width: 100%;
+}
+</style>

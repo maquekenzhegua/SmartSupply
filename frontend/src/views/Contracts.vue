@@ -1,16 +1,17 @@
 <template>
-  <div>
-    <el-card>
-      <template #header>
-        <div style="display: flex; justify-content: space-between; align-items: center">
-          <span>合同管理</span>
-          <div style="display:flex; gap:8px">
-            <el-button @click="openCreate">新建合同</el-button>
-            <el-upload :before-upload="beforeUpload" :show-file-list="false" accept=".pdf,.txt,.docx"><el-button type="primary">上传合同</el-button></el-upload>
-          </div>
-        </div>
-      </template>
-      <el-alert type="info" :closable="false" style="margin-bottom: 12px" title="支持传统新建/编辑，也支持上传文件触发 RAG 风控分析" />
+  <div class="page">
+    <div class="page-header">
+      <div class="titles">
+        <h1 class="page-title">合同管理</h1>
+        <p class="page-desc">合同台账 · 上传文件触发 RAG 风控分析，点击行查看报告</p>
+      </div>
+      <div class="actions">
+        <el-button :icon="Plus" @click="openCreate">新建合同</el-button>
+        <el-upload :before-upload="beforeUpload" :show-file-list="false" accept=".pdf,.txt,.docx"><el-button type="primary" :icon="Upload">上传合同</el-button></el-upload>
+      </div>
+    </div>
+
+    <el-card class="list-card" shadow="never">
       <el-table v-loading="loading" :data="rows" @row-click="onRowClick">
         <el-table-column prop="title" label="合同" min-width="220" />
         <el-table-column prop="supplier_name" label="供应商" width="140" />
@@ -21,11 +22,11 @@
           <template #default="{ row }">
             <el-button size="small" @click.stop="viewReport(row)">风控报告</el-button>
             <el-button size="small" @click.stop="openCreate(row)">编辑</el-button>
-            <el-button size="small" type="danger" @click.stop="remove(row)">删除</el-button>
+            <el-button size="small" type="danger" plain @click.stop="remove(row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
-      <el-pagination v-model:current-page="page" style="margin-top:12px; justify-content:flex-end" :page-size="size" :total="total" layout="prev, pager, next" @current-change="load" />
+      <el-pagination v-model:current-page="page" class="pager" :page-size="size" :total="total" layout="prev, pager, next" @current-change="load" />
     </el-card>
 
     <el-dialog v-model="formVisible" :title="form.id ? '编辑合同' : '新建合同'" width="500px">
@@ -40,7 +41,7 @@
     </el-dialog>
 
     <el-dialog v-model="reportVisible" title="风控报告" width="720px">
-      <div v-loading="reportLoading" style="white-space: pre-wrap; line-height: 1.7">{{ reportText || '暂无报告' }}</div>
+      <div v-loading="reportLoading" class="report-text">{{ reportText || '暂无报告' }}</div>
     </el-dialog>
   </div>
 </template>
@@ -50,6 +51,7 @@ import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '@/api'
 import request from '@/utils/request'
+import { Plus, Upload } from '@element-plus/icons-vue'
 const rows = ref<Record<string, unknown>[]>([]), loading = ref(false)
 const page = ref(1), size = ref(10), total = ref(0)
 const reportVisible = ref(false), reportLoading = ref(false), reportText = ref('')
@@ -95,3 +97,11 @@ async function viewReport(row: Record<string, unknown>) {
 function onRowClick(row: Record<string, unknown>) { viewReport(row) }
 onMounted(load)
 </script>
+
+<style scoped>
+.report-text {
+  white-space: pre-wrap;
+  line-height: 1.7;
+  color: var(--ink-700);
+}
+</style>

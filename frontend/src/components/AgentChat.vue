@@ -1,68 +1,141 @@
 <template>
   <div class="agent-chat">
     <div ref="msgRef" class="messages">
-      <div v-for="(m, i) in messages" :key="i" :class="['msg', m.role]">
-        <div class="role">{{ m.role === 'user' ? '你' : (m.agentType || 'Agent') }}</div>
-        <div v-if="m.role === 'assistant' && m.tools && m.tools.length" class="tool-chips">
-          <el-tag v-for="(tool, ti) in m.tools" :key="ti" type="warning" effect="plain" size="small" style="margin-right:4px">
-            🔧 {{ tool.split('(')[0] }}
-          </el-tag>
+      <div class="thread">
+        <!-- 会话开场：仅剩首条问候时展示英雄区 + 快捷提问 -->
+        <div v-if="messages.length === 1 && !loading" class="hero">
+          <div class="hero-logo"><el-icon :size="22"><Opportunity /></el-icon></div>
+          <h2 class="hero-title">SmartSupply Agent</h2>
+          <p class="hero-desc">{{ messages[0].content }}</p>
+          <div class="hero-chips">
+            <button v-for="q in suggestions" :key="q" class="chip" type="button" @click="quickAsk(q)">
+              <el-icon :size="12"><ChatDotRound /></el-icon>{{ q }}
+            </button>
+          </div>
         </div>
-        <div v-if="m.role === 'assistant'" class="bubble md" v-html="renderMd(m.content)"></div>
-        <div v-else class="bubble">{{ m.content }}</div>
-        <div v-if="m.needConfirm" class="confirm-row">
-          <template v-if="m.threadId">
-            <el-button type="danger" size="small" @click="confirmWrite(i, true)">批准执行</el-button>
-            <el-button size="small" @click="confirmWrite(i, false)">拒绝</el-button>
-            <span style="font-size:12px;color:#909399">Agent 写操作需人工批准（HITL），批准后继续执行</span>
+
+        <div v-for="(m, i) in messages" :key="i" :class="['msg', m.role]">
+          <!-- 用户消息：右对齐品牌气泡 -->
+          <template v-if="m.role === 'user'">
+            <div class="bubble user-bubble">{{ m.content }}</div>
           </template>
+
+          <!-- 助手消息：头像 + 无气泡正文 -->
           <template v-else>
-            <el-button type="warning" size="small" @click="confirmWrite(i, true)">确认创建采购单</el-button>
-            <span style="font-size:12px;color:#909399">写操作需二次确认，确认后将重新提交</span>
+            <div class="assistant-row">
+              <div class="bot-avatar"><el-icon :size="13"><Opportunity /></el-icon></div>
+              <div class="assistant-body">
+                <div class="role">{{ m.agentType || 'Agent' }}</div>
+
+                <div v-if="m.tools && m.tools.length" class="tool-block">
+                  <button class="fold-head" type="button" @click="toggle(i, 'tools')">
+                    <el-icon :size="12"><Operation /></el-icon>
+                    <span>已调用 {{ m.tools.length }} 个工具</span>
+                    <el-icon :size="12" class="fold-caret" :class="{ open: isOpen(i, 'tools') }"><ArrowDown /></el-icon>
+                  </button>
+                  <div v-if="isOpen(i, 'tools')" class="fold-body">
+                    <el-tag v-for="(tool, ti) in m.tools" :key="ti" size="small" effect="plain" round>{{ tool.split('(')[0] }}</el-tag>
+                  </div>
+                </div>
+
+                <div class="bubble md" v-html="renderMd(m.content)"></div>
+
+                <!-- 写闸门：HITL 人工批准 / 快路径二次确认 -->
+                <div v-if="m.needConfirm" class="confirm-row">
+                  <el-icon :size="14" class="confirm-icon"><WarningFilled /></el-icon>
+                  <template v-if="m.threadId">
+                    <el-button type="danger" size="small" @click="confirmWrite(i, true)">批准执行</el-button>
+                    <el-button size="small" @click="confirmWrite(i, false)">拒绝</el-button>
+                    <span class="confirm-note">Agent 写操作需人工批准（HITL），批准后继续执行</span>
+                  </template>
+                  <template v-else>
+                    <el-button type="warning" size="small" @click="confirmWrite(i, true)">确认创建采购单</el-button>
+                    <span class="confirm-note">写操作需二次确认，确认后将重新提交</span>
+                  </template>
+                </div>
+
+                <div v-if="m.runId" class="trace-row">
+                  <el-button link size="small" type="primary" @click="toggleTrace(i)">
+                    {{ traces[i] ? '收起推理轨迹' : '查看推理轨迹' }}
+                  </el-button>
+                  <div v-if="traces[i]" class="trace-box">
+                    <div class="trace-meta">{{ traces[i].run.mode }} · {{ traces[i].run.status }} · {{ traces[i].run.latency_ms }}ms</div>
+                    <div v-for="(s, si) in traces[i].steps" :key="si" class="trace-line">
+                      {{ s.seq }}. {{ s.node }}<template v-if="s.name && s.name !== s.node"> · {{ s.name }}</template><template v-if="s.success === false"> ⚠失败</template>
+                    </div>
+                    <div v-for="(t, ti) in traces[i].toolCalls" :key="'t'+ti" class="trace-line">
+                      <el-icon :size="11"><Operation /></el-icon> {{ t.tool }} <span class="trace-args">{{ t.args_json }}</span><span v-if="t.success === false" class="trace-fail">（失败）</span>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- RAG 引用来源 -->
+                <div v-if="m.citations && m.citations.length" class="tool-block">
+                  <button class="fold-head" type="button" @click="toggle(i, 'citations')">
+                    <el-icon :size="12"><Document /></el-icon>
+                    <span>引用 {{ m.citations.length }} 条来源</span>
+                    <el-icon :size="12" class="fold-caret" :class="{ open: isOpen(i, 'citations') }"><ArrowDown /></el-icon>
+                  </button>
+                  <div v-if="isOpen(i, 'citations')" class="fold-body citation-list">
+                    <div v-for="c in m.citations" :key="c.idx" class="citation">
+                      <span class="cite-idx">[{{ c.idx }}]</span>
+                      <span class="cite-title">{{ c.title }}</span>
+                      <span class="cite-score">score={{ Number(c.score).toFixed(3) }}</span>
+                      <div class="cite-snippet">{{ c.snippet }}</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div v-if="m.runId" class="feedback-row">
+                  <el-button link size="small" class="fb" @click="feedback(i, 1)">👍</el-button>
+                  <el-button link size="small" class="fb" @click="feedback(i, -1)">👎</el-button>
+                </div>
+              </div>
+            </div>
           </template>
         </div>
-        <div v-if="m.role === 'assistant' && (m as any).runId" style="margin-top:2px">
-          <el-button link size="small" type="primary" @click="toggleTrace(i)">{{ traces[i] ? '收起推理轨迹' : '查看推理轨迹' }}</el-button>
-          <div v-if="traces[i]" class="trace-box">
-            <div style="font-size:12px;color:#606266">{{ traces[i].run.mode }} · {{ traces[i].run.status }} · {{ traces[i].run.latency_ms }}ms</div>
-            <div v-for="(s, si) in traces[i].steps" :key="si" style="font-size:12px;color:#909399">
-              {{ s.seq }}. {{ s.node }}<template v-if="s.name && s.name !== s.node"> · {{ s.name }}</template><template v-if="s.success === false"> ⚠失败</template>
-            </div>
-            <div v-for="(t, ti) in traces[i].toolCalls" :key="'t'+ti" style="font-size:12px">
-              🔧 {{ t.tool }} <span style="color:#909399">{{ t.args_json }}</span><span v-if="t.success === false" style="color:#e6a23c">（失败）</span>
+
+        <!-- 生成中占位 -->
+        <div v-if="loading" class="msg assistant">
+          <div class="assistant-row">
+            <div class="bot-avatar pulse"><el-icon :size="13"><Opportunity /></el-icon></div>
+            <div class="assistant-body">
+              <div class="role">Agent</div>
+              <div class="bubble typing">思考中…<span v-if="statusText" class="typing-status">{{ statusText }}</span><span v-else-if="streamText" class="typing-status">{{ streamText.slice(0, 40) }}…</span></div>
             </div>
           </div>
-        </div>
-        <div v-if="m.role === 'assistant' && m.citations && m.citations.length" class="citations">
-          <div style="font-size:12px; color:#909399; margin-top:4px">引用</div>
-          <div v-for="c in m.citations" :key="c.idx" style="font-size:12px; background:#fafafa; padding:4px 8px; border-radius:6px; margin:4px 0">
-            <b>[{{ c.idx }}] {{ c.title }}</b> <span style="color:#909399">score={{ Number(c.score).toFixed(3) }}</span><br />{{ c.snippet }}
-          </div>
-        </div>
-        <div v-if="m.role === 'assistant'" style="display:flex; gap:6px; margin-top:4px">
-          <el-button size="small" @click="feedback(i, 1)">👍</el-button>
-          <el-button size="small" @click="feedback(i, -1)">👎</el-button>
         </div>
       </div>
-      <div v-if="loading" class="msg assistant"><div class="bubble">思考中…<span v-if="statusText" style="color:#909399">{{ statusText }}</span><span v-else-if="streamText">{{ streamText.slice(0, 40) }}…</span></div></div>
     </div>
+
     <div v-if="toolList.length" class="tool-bar">
-      <span style="color:#909399; font-size:12px">可用工具：</span>
-      <el-tag v-for="t in toolList" :key="t.name" size="small" style="margin-left:6px">{{ t.name }}</el-tag>
+      <span class="tool-bar-label">可用工具</span>
+      <el-tag v-for="t in toolList" :key="t.name" size="small" effect="plain" round class="tool-tag">{{ t.name }}</el-tag>
     </div>
+
+    <!-- 输入区：保留 .input-row 类名（e2e 依赖），重构为胶囊焦点区 -->
     <div class="input-row">
-      <el-select v-model="agentType" style="width: 160px" size="large">
-        <el-option label="通用助手" value="general" />
-        <el-option label="合同风控" value="contract" />
-        <el-option label="补货预测" value="replenishment" />
-        <el-option label="经营分析" value="bi" />
-      </el-select>
-      <el-input v-model="input" :placeholder="placeholderText" size="large" @keyup.enter="send" />
-      <el-button size="small" @click="clearSession">清空记忆</el-button>
-      <el-switch v-model="useStream" active-text="流式" style="margin-left:6px" />
-      <el-switch v-model="useDeep" active-text="深度推理" :disabled="!deepEnabled" :title="deepEnabled ? '走 Python LangGraph 边车' : '需启动 agent-python 且 Java 开启 AGENT_PYTHON_ENABLED'" style="margin-left:6px" />
-      <el-button v-if="loading" size="large" @click="stopGen">停止生成</el-button>
-      <el-button v-else type="primary" size="large" @click="send">发送</el-button>
+      <el-input
+        v-model="input"
+        class="composer-input"
+        :placeholder="placeholderText"
+        size="large"
+        @keyup.enter="send"
+      />
+      <div class="composer-meta">
+        <el-select v-model="agentType" class="agent-select" size="default">
+          <el-option label="通用助手" value="general" />
+          <el-option label="合同风控" value="contract" />
+          <el-option label="补货预测" value="replenishment" />
+          <el-option label="经营分析" value="bi" />
+        </el-select>
+        <el-switch v-model="useStream" active-text="流式" size="small" />
+        <el-switch v-model="useDeep" active-text="深度推理" size="small" :disabled="!deepEnabled" :title="deepEnabled ? '走 Python LangGraph 边车' : '需启动 agent-python 且 Java 开启 AGENT_PYTHON_ENABLED'" />
+        <div class="composer-spacer"></div>
+        <el-button link size="small" class="clear-btn" @click="clearSession"><el-icon><RefreshLeft /></el-icon>清空记忆</el-button>
+        <el-button v-if="loading" size="default" @click="stopGen">停止生成</el-button>
+        <el-button v-else type="primary" size="default" :icon="Promotion" @click="send">发送</el-button>
+      </div>
     </div>
   </div>
 </template>
@@ -74,6 +147,7 @@ import { ElMessage } from 'element-plus'
 import { api } from '@/api'
 import request from '@/utils/request'
 import { SseParser } from '@/utils/sse'
+import { Promotion } from '@element-plus/icons-vue'
 
 marked.setOptions({ breaks: true, gfm: true })
 // 先转义 HTML 再解析 markdown：保留 markdown 语法的同时中和模型输出里的原始 HTML 标签
@@ -96,7 +170,7 @@ const statusText = ref('')
 const sessionId = ref('sess-' + Math.random().toString(36).slice(2, 8))
 const toolList = ref<{ name: string; desc: string }[]>([])
 const messages = ref<{ role: 'user' | 'assistant'; content: string; agentType?: string; tools?: string[]; citations?: any[]; runId?: number; needConfirm?: boolean; raw?: string; threadId?: string; confirmInfo?: any }[]>([
-  { role: 'assistant', content: '你好，我是 SmartSupply Agent，可查库存、创建采购单、搜合同/商品，支持多轮记忆。试试：“哪些SKU低于安全库存？”或“帮我查一下T恤的SKU”。', agentType: 'Agent' },
+  { role: 'assistant', content: '你好，我是 SmartSupply Agent，可查库存、创建采购单、搜合同/商品，支持多轮记忆。试试："哪些SKU低于安全库存？"或"帮我查一下T恤的SKU"。', agentType: 'Agent' },
 ])
 const traces = ref<Record<number, { run: any; steps: any[]; toolCalls: any[] }>>({})
 const msgRef = ref<HTMLElement>()
@@ -107,6 +181,23 @@ function stopGen() {
   abortController?.abort()
 }
 onBeforeUnmount(() => abortController?.abort())
+
+// 工具调用/引用来源折叠卡片状态
+const folds = ref<Record<string, boolean>>({})
+function isOpen(i: number, kind: 'tools' | 'citations') { return !!folds.value[`${kind}-${i}`] }
+function toggle(i: number, kind: 'tools' | 'citations') { folds.value[`${kind}-${i}`] = !folds.value[`${kind}-${i}`] }
+
+// 英雄区快捷提问：直接发送
+const suggestions = [
+  '哪些 SKU 低于安全库存？',
+  '帮我查一下 T 恤的 SKU',
+  '各类商品库存分布如何？',
+  '查一下合同里有没有无限连带责任条款',
+]
+function quickAsk(text: string) {
+  input.value = text
+  send()
+}
 
 async function toggleTrace(i: number) {
   const m = messages.value[i] as any
@@ -145,7 +236,7 @@ function confirmWrite(i: number, approved = true) {
 
 const placeholderText = computed(() => {
   switch (agentType.value) {
-    case 'contract': return '如：帮我查合同“2026年度T恤采购”是否有风险'
+    case 'contract': return '如：帮我查合同"2026年度T恤采购"是否有风险'
     case 'replenishment': return '如：SKU-T001-WH-M 库存够吗？不够就帮我下单'
     case 'bi': return '如：各类商品库存分布如何？'
     default: return '如：库存够吗？/ 搜一下帆布包 / 查合同风险'
@@ -359,23 +450,390 @@ defineExpose({ send, messages, agentType, input })
 </script>
 
 <style scoped>
-.agent-chat { display: flex; flex-direction: column; height: 100%; }
-.messages { flex: 1; overflow: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
-.msg { display: flex; flex-direction: column; gap: 4px; }
-.msg.user { align-items: flex-end; }
-.role { font-size: 12px; color: #909399; }
-.bubble { max-width: 82%; padding: 10px 14px; border-radius: 12px; white-space: pre-wrap; word-break: break-word; line-height: 1.6; }
-.msg.user .bubble { background: #409eff; color: #fff; }
-.msg.assistant .bubble { background: #f2f3f5; color: #303133; }
-.msg.assistant .bubble.md :deep(p) { margin: 0 0 6px; }
-.msg.assistant .bubble.md :deep(pre) { background: #282c34; color: #abb2bf; padding: 8px 10px; border-radius: 8px; overflow-x: auto; font-size: 12px; }
-.msg.assistant .bubble.md :deep(code) { font-family: Consolas, Menlo, monospace; }
-.msg.assistant .bubble.md :deep(ul), .msg.assistant .bubble.md :deep(ol) { margin: 4px 0; padding-left: 20px; }
-.msg.assistant .bubble.md :deep(table) { border-collapse: collapse; margin: 6px 0; }
-.msg.assistant .bubble.md :deep(th), .msg.assistant .bubble.md :deep(td) { border: 1px solid #dcdfe6; padding: 4px 8px; }
-.tool-chips { max-width: 82%; display: flex; flex-wrap: wrap; gap: 2px; }
-.confirm-row { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
-.trace-box { border: 1px solid #ebeef5; border-radius: 8px; padding: 6px 10px; background: #fafafa; display: flex; flex-direction: column; gap: 2px; max-width: 82%; }
-.input-row { display: flex; gap: 8px; padding: 12px; border-top: 1px solid #ebeef5; align-items: center; }
-.tool-bar { padding: 6px 12px; border-top: 1px solid #f2f3f5; display:flex; align-items:center; flex-wrap:wrap; gap:4px }
+.agent-chat {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.messages {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--bg-page);
+}
+
+.thread {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 24px 20px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+/* ------- 英雄区 ------- */
+.hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 48px 16px 8px;
+}
+
+.hero-logo {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 16px;
+  background: var(--brand-gradient);
+  color: #fff;
+  box-shadow: 0 8px 20px rgba(79, 70, 229, 0.35);
+}
+
+.hero-title {
+  margin: 16px 0 6px;
+  font-size: 20px;
+}
+
+.hero-desc {
+  margin: 0;
+  max-width: 460px;
+  font-size: 13.5px;
+  line-height: 1.7;
+  color: var(--ink-500);
+}
+
+.hero-chips {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 22px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  font-size: 13px;
+  color: var(--ink-700);
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+
+.chip:hover {
+  color: var(--brand-700);
+  border-color: var(--brand-300);
+  background: var(--brand-50);
+}
+
+/* ------- 消息 ------- */
+.msg {
+  display: flex;
+  flex-direction: column;
+}
+
+.msg.user {
+  align-items: flex-end;
+}
+
+.bubble {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.65;
+}
+
+.user-bubble {
+  max-width: 78%;
+  padding: 10px 16px;
+  border-radius: 16px 16px 4px 16px;
+  background: var(--brand-600);
+  color: #fff;
+  font-size: 14px;
+  box-shadow: 0 2px 8px rgba(79, 70, 229, 0.25);
+}
+
+.assistant-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.bot-avatar {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  margin-top: 2px;
+  border-radius: 9px;
+  background: var(--brand-gradient);
+  color: #fff;
+}
+
+.bot-avatar.pulse {
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+.assistant-body {
+  min-width: 0;
+  flex: 1;
+}
+
+.role {
+  font-size: 12px;
+  color: var(--ink-400);
+  margin-bottom: 4px;
+}
+
+.msg.assistant .bubble.md {
+  color: var(--ink-900);
+}
+
+/* 折叠卡片：工具调用 / 引用 */
+.tool-block {
+  margin: 2px 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.fold-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  background: transparent;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ink-500);
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.fold-head:hover {
+  background: var(--ink-50);
+}
+
+.fold-caret {
+  margin-left: auto;
+  transition: transform 0.18s ease;
+}
+
+.fold-caret.open {
+  transform: rotate(180deg);
+}
+
+.fold-body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 12px 10px;
+}
+
+/* 引用列表 */
+.citation-list {
+  flex-direction: column;
+  gap: 8px;
+}
+
+.citation {
+  position: relative;
+  padding: 8px 10px 8px 34px;
+  border-radius: 8px;
+  background: var(--ink-50);
+  font-size: 12.5px;
+}
+
+.cite-idx {
+  position: absolute;
+  left: 10px;
+  top: 8px;
+  font-weight: 700;
+  color: var(--brand-600);
+  font-variant-numeric: tabular-nums;
+}
+
+.cite-title {
+  font-weight: 600;
+  color: var(--ink-900);
+}
+
+.cite-score {
+  margin-left: 8px;
+  color: var(--ink-400);
+  font-variant-numeric: tabular-nums;
+}
+
+.cite-snippet {
+  margin-top: 3px;
+  color: var(--ink-500);
+  line-height: 1.55;
+}
+
+/* 写闸门确认条 */
+.confirm-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 10px 14px;
+  border: 1px solid #fde68a;
+  background: #fffbeb;
+  border-radius: 10px;
+}
+
+.confirm-icon {
+  color: var(--warning);
+}
+
+.confirm-note {
+  font-size: 12px;
+  color: var(--ink-500);
+}
+
+/* 推理轨迹 */
+.trace-row {
+  margin-top: 8px;
+}
+
+.trace-box {
+  margin-top: 6px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.trace-meta {
+  font-size: 12px;
+  color: var(--ink-600);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.trace-line {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--ink-500);
+  font-family: var(--font-mono);
+}
+
+.trace-args {
+  color: var(--ink-400);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trace-fail {
+  color: var(--warning);
+}
+
+.feedback-row {
+  display: flex;
+  gap: 2px;
+  margin-top: 6px;
+}
+
+.fb {
+  font-size: 12px;
+}
+
+/* 生成中 */
+.typing {
+  font-size: 14px;
+  color: var(--ink-500);
+}
+
+.typing-status {
+  margin-left: 6px;
+  color: var(--ink-400);
+  font-size: 12px;
+}
+
+/* ------- 工具栏 ------- */
+.tool-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 900px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 6px 20px 4px;
+}
+
+.tool-bar-label {
+  font-size: 12px;
+  color: var(--ink-400);
+}
+
+.tool-tag {
+  color: var(--ink-500);
+}
+
+/* ------- 输入区（.input-row 类名供 e2e 使用） ------- */
+.input-row {
+  width: 100%;
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 0 20px 18px;
+}
+
+.input-row :deep(.composer-input .el-input__wrapper) {
+  border-radius: 14px;
+  padding: 6px 16px;
+  box-shadow: 0 0 0 1px var(--border) inset, var(--shadow-card);
+  transition: box-shadow 0.18s ease;
+}
+
+.input-row :deep(.composer-input .el-input__wrapper.is-focus) {
+  box-shadow: 0 0 0 2px var(--brand-500) inset, 0 0 0 4px var(--brand-100);
+}
+
+.composer-meta {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 8px;
+  padding: 0 4px;
+}
+
+.agent-select {
+  width: 128px;
+}
+
+.composer-spacer {
+  flex: 1;
+}
+
+.clear-btn {
+  color: var(--ink-400);
+}
+
+.clear-btn:hover {
+  color: var(--ink-600);
+}
 </style>

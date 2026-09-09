@@ -1,13 +1,22 @@
 <template>
-  <div>
-    <el-card>
-      <template #header><div style="display: flex; justify-content: space-between"><span>仓库管理</span><el-button type="primary" @click="openDialog()">新增仓库</el-button></div></template>
+  <div class="page">
+    <div class="page-header">
+      <div class="titles">
+        <h1 class="page-title">仓库管理</h1>
+        <p class="page-desc">仓库主数据与库位地址</p>
+      </div>
+      <div class="actions">
+        <el-button type="primary" :icon="Plus" @click="openDialog()">新增仓库</el-button>
+      </div>
+    </div>
+
+    <el-card class="list-card" shadow="never">
       <el-table v-loading="loading" :data="rows">
         <el-table-column prop="name" label="仓库" min-width="160" />
         <el-table-column prop="location" label="地址" min-width="200" />
-        <el-table-column label="操作" width="160"><template #default="{ row }"><el-button size="small" @click="openDialog(row)">编辑</el-button><el-button size="small" type="danger" @click="remove(row)">删除</el-button></template></el-table-column>
+        <el-table-column label="操作" width="160"><template #default="{ row }"><el-button size="small" @click="openDialog(row)">编辑</el-button><el-button size="small" type="danger" plain @click="remove(row)">删除</el-button></template></el-table-column>
       </el-table>
-      <el-pagination v-model:current-page="page" style="margin-top:12px; justify-content:flex-end" :page-size="size" :total="total" layout="prev, pager, next" @current-change="load" />
+      <el-pagination v-model:current-page="page" class="pager" :page-size="size" :total="total" layout="prev, pager, next" @current-change="load" />
     </el-card>
     <el-dialog v-model="visible" :title="form.id ? '编辑仓库' : '新增仓库'" width="420px">
       <el-form label-width="80px"><el-form-item label="名称"><el-input v-model="form.name" /></el-form-item><el-form-item label="地址"><el-input v-model="form.location" /></el-form-item></el-form>
@@ -20,6 +29,7 @@
 import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '@/api'
+import { Plus } from '@element-plus/icons-vue'
 const rows = ref<Record<string, unknown>[]>([]), loading = ref(false)
 const page = ref(1), size = ref(10), total = ref(0)
 const visible = ref(false)

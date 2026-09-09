@@ -1,7 +1,13 @@
 <template>
-  <div>
-    <el-card>
-      <template #header><span>库存管理</span><el-tag type="info" style="margin-left: 8px">可点 AI建议 触发补货 Agent</el-tag></template>
+  <div class="page">
+    <div class="page-header">
+      <div class="titles">
+        <h1 class="page-title">库存管理</h1>
+        <p class="page-desc">实时库存与安全库存预警 · 点击「AI建议」触发补货 Agent</p>
+      </div>
+    </div>
+
+    <el-card class="list-card" shadow="never">
       <el-table v-loading="loading" :data="rows">
         <el-table-column prop="sku_code" label="SKU" width="160" />
         <el-table-column prop="product_name" label="商品" />
@@ -9,14 +15,14 @@
         <el-table-column prop="warehouse" label="仓库" width="120" />
         <el-table-column prop="quantity" label="库存" width="90" />
         <el-table-column prop="safety_stock" label="安全库存" width="100" />
-        <el-table-column label="状态" width="110"><template #default="{ row }"><el-tag :type="row.below_safety ? 'danger' : 'success'">{{ row.below_safety ? '低于安全库存' : '充足' }}</el-tag></template></el-table-column>
-        <el-table-column label="操作" width="120"><template #default="{ row }"><el-button size="small" type="primary" @click="advise(row)">AI建议</el-button></template></el-table-column>
+        <el-table-column label="状态" width="130"><template #default="{ row }"><el-tag :type="row.below_safety ? 'danger' : 'success'" effect="light" round>{{ row.below_safety ? '低于安全库存' : '充足' }}</el-tag></template></el-table-column>
+        <el-table-column label="操作" width="120"><template #default="{ row }"><el-button size="small" type="primary" plain :icon="MagicStick" @click="advise(row)">AI建议</el-button></template></el-table-column>
       </el-table>
-      <el-pagination v-model:current-page="page" style="margin-top: 12px; justify-content: flex-end" :page-size="size" :total="total" layout="prev, pager, next" @current-change="load" />
+      <el-pagination v-model:current-page="page" class="pager" :page-size="size" :total="total" layout="prev, pager, next" @current-change="load" />
     </el-card>
 
     <el-dialog v-model="dialogVisible" title="补货 Agent 建议" width="560px">
-      <div style="white-space: pre-wrap; line-height: 1.7">{{ adviseText }}</div>
+      <div class="advise-text">{{ adviseText }}</div>
       <template #footer><el-button @click="dialogVisible=false">关闭</el-button></template>
     </el-dialog>
   </div>
@@ -25,6 +31,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { api } from '@/api'
+import { MagicStick } from '@element-plus/icons-vue'
 const rows = ref<Record<string, unknown>[]>([])
 const loading = ref(false)
 const page = ref(1)
@@ -51,3 +58,11 @@ async function advise(row: Record<string, unknown>) {
 }
 onMounted(load)
 </script>
+
+<style scoped>
+.advise-text {
+  white-space: pre-wrap;
+  line-height: 1.7;
+  color: var(--ink-700);
+}
+</style>

@@ -1,0 +1,463 @@
+/* ============================================================
+   SmartSupply 设计体系 — 现代企业 SaaS 风
+   主色：靛蓝 #4F46E5 · 仅浅色 · 8px 间距网格 · 6-12px 圆角
+   ============================================================ */
+
+:root {
+  /* 品牌色阶（indigo） */
+  --brand-50: #eef2ff;
+  --brand-100: #e0e7ff;
+  --brand-200: #c7d2fe;
+  --brand-300: #a5b4fc;
+  --brand-400: #818cf8;
+  --brand-500: #6366f1;
+  --brand-600: #4f46e5;
+  --brand-700: #4338ca;
+  --brand-800: #3730a3;
+  --brand-gradient: linear-gradient(135deg, #6366f1 0%, #4f46e5 55%, #4338ca 100%);
+
+  /* 中性色（slate） */
+  --ink-900: #0f172a;
+  --ink-700: #334155;
+  --ink-600: #475569;
+  --ink-500: #64748b;
+  --ink-400: #94a3b8;
+  --ink-300: #cbd5e1;
+  --ink-200: #e2e8f0;
+  --ink-100: #f1f5f9;
+  --ink-50: #f8fafc;
+
+  /* 语义色 */
+  --success: #10b981;
+  --warning: #f59e0b;
+  --danger: #ef4444;
+  --info: #64748b;
+
+  /* 布局与质感 */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.04), 0 1px 3px rgba(15, 23, 42, 0.06);
+  --shadow-lift: 0 4px 12px rgba(15, 23, 42, 0.08), 0 2px 4px rgba(15, 23, 42, 0.05);
+  --shadow-pop: 0 12px 32px rgba(15, 23, 42, 0.12);
+  --border: var(--ink-200);
+  --bg-page: var(--ink-50);
+  --bg-card: #ffffff;
+
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: 'JetBrains Mono', 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+
+  /* ---- Element Plus 主题变量覆盖 ---- */
+  --el-color-primary: var(--brand-600);
+  --el-color-primary-light-3: #7c74ef;
+  --el-color-primary-light-5: #9b95f4;
+  --el-color-primary-light-7: #bebaf8;
+  --el-color-primary-light-8: #d5d2fb;
+  --el-color-primary-light-9: #eef2ff;
+  --el-color-primary-dark-2: var(--brand-700);
+  --el-color-success: var(--success);
+  --el-color-success-light-9: #ecfdf5;
+  --el-color-warning: var(--warning);
+  --el-color-warning-light-9: #fffbeb;
+  --el-color-danger: var(--danger);
+  --el-color-danger-light-9: #fef2f2;
+  --el-color-error: var(--danger);
+  --el-color-info: var(--info);
+  --el-color-info-light-9: #f1f5f9;
+  --el-text-color-primary: var(--ink-900);
+  --el-text-color-regular: var(--ink-700);
+  --el-text-color-secondary: var(--ink-500);
+  --el-text-color-placeholder: var(--ink-400);
+  --el-border-color: var(--ink-200);
+  --el-border-color-light: var(--ink-200);
+  --el-border-color-lighter: var(--ink-100);
+  --el-border-color-extra-light: var(--ink-100);
+  --el-fill-color-light: var(--ink-100);
+  --el-fill-color-lighter: var(--ink-50);
+  --el-bg-color-page: var(--ink-50);
+  --el-border-radius-base: var(--radius-md);
+  --el-border-radius-small: var(--radius-sm);
+  --el-border-radius-round: 999px;
+  --el-box-shadow-light: var(--shadow-lift);
+  --el-font-family: var(--font-sans);
+}
+
+/* ---------------- 基础排版 ---------------- */
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  color: var(--ink-900);
+  background: var(--bg-page);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* 数字统一等宽对齐：表格、统计值、时间列 */
+.el-table,
+.el-statistic__number,
+.el-pagination,
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+h1, h2, h3, h4 {
+  color: var(--ink-900);
+  font-weight: 600;
+}
+
+::selection {
+  background: var(--brand-200);
+  color: var(--brand-800);
+}
+
+/* 细滚动条 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--ink-300);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--ink-400);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ---------------- 通用页面骨架 ---------------- */
+.page {
+  max-width: 1440px;
+  margin: 0 auto;
+}
+
+.page-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.page-header .titles {
+  min-width: 0;
+}
+
+.page-title {
+  margin: 0;
+  font-size: 20px;
+  line-height: 28px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.page-desc {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--ink-500);
+}
+
+.page-header .actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* 工具栏：筛选条件在左，操作在右 */
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.toolbar .spacer {
+  flex: 1;
+}
+
+/* 列表页工具栏与分页的标准间距 */
+.list-card .toolbar {
+  margin-bottom: 14px;
+}
+
+.pager {
+  margin-top: 14px;
+  justify-content: flex-end;
+}
+
+/* 弹窗与消息框质感 */
+.el-dialog {
+  border-radius: var(--radius-lg);
+}
+
+.el-message-box {
+  border-radius: var(--radius-lg);
+}
+
+/* ---------------- 卡片 ---------------- */
+.el-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card) !important;
+  transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.el-card__header {
+  border-bottom: 1px solid var(--ink-100);
+  padding: 14px 20px;
+  font-weight: 600;
+  color: var(--ink-900);
+}
+
+/* 可交互卡片悬浮微抬升 */
+.hover-lift:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-lift) !important;
+}
+
+/* ---------------- 表格 ---------------- */
+.el-table {
+  --el-table-header-bg-color: var(--ink-50);
+  --el-table-header-text-color: var(--ink-500);
+  --el-table-row-hover-bg-color: var(--brand-50);
+  --el-table-border-color: var(--ink-100);
+  border-radius: var(--radius-md);
+  font-size: 13.5px;
+}
+
+.el-table th.el-table__cell {
+  font-weight: 600;
+  font-size: 12.5px;
+  letter-spacing: 0.02em;
+}
+
+.el-table .el-table__empty-block {
+  padding: 24px 0;
+}
+
+/* ---------------- 按钮 / 输入 / 标签 ---------------- */
+.el-button {
+  font-weight: 500;
+  transition: all 0.18s ease;
+}
+
+.el-button--primary:not(.is-link):not(.is-text) {
+  --el-button-hover-bg-color: var(--brand-500);
+  --el-button-active-bg-color: var(--brand-700);
+}
+
+.el-input__wrapper,
+.el-select__wrapper,
+.el-textarea__inner {
+  border-radius: var(--radius-md);
+}
+
+.el-tag {
+  border-radius: var(--radius-sm);
+  font-weight: 500;
+}
+
+/* 主按钮品牌渐变（仅限关键 CTA，通过 .btn-brand 使用） */
+.btn-brand {
+  background: var(--brand-gradient);
+  border: none;
+  color: #fff;
+}
+
+.btn-brand:hover,
+.btn-brand:focus {
+  color: #fff;
+  filter: brightness(1.06);
+}
+
+/* ---------------- 侧边导航 ---------------- */
+.nav-menu.el-menu {
+  border-right: none;
+  background: transparent;
+}
+
+.nav-menu .el-menu-item {
+  height: 36px;
+  line-height: 36px;
+  margin: 1px 10px;
+  border-radius: var(--radius-md);
+  color: var(--ink-600);
+  transition: background-color 0.18s ease, color 0.18s ease;
+}
+
+.nav-menu .el-menu-item:hover {
+  background: var(--ink-100);
+  color: var(--ink-900);
+}
+
+.nav-menu .el-menu-item.is-active {
+  background: var(--brand-50);
+  color: var(--brand-700);
+  font-weight: 600;
+}
+
+.nav-menu .el-menu-item.is-active::before {
+  content: '';
+  position: absolute;
+  left: -10px;
+  top: 7px;
+  bottom: 7px;
+  width: 3px;
+  border-radius: 999px;
+  background: var(--brand-600);
+}
+
+.nav-menu .el-sub-menu__title {
+  height: 36px;
+  line-height: 36px;
+  margin: 1px 10px;
+  border-radius: var(--radius-md);
+  color: var(--ink-600);
+}
+
+.nav-menu .el-sub-menu__title:hover {
+  background: var(--ink-100);
+  color: var(--ink-900);
+}
+
+.nav-menu .el-sub-menu .el-menu-item {
+  min-width: 0;
+}
+
+.menu-group-title {
+  padding: 12px 22px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--ink-400);
+  text-transform: uppercase;
+  list-style: none;
+  white-space: nowrap;
+}
+
+/* ---------------- 顶栏 ---------------- */
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: 60px;
+  padding: 0 20px;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--ink-200);
+}
+
+/* ---------------- 页面切换微动效 ---------------- */
+.page-enter-active,
+.page-leave-active {
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.page-enter-from {
+  opacity: 0;
+  transform: translateY(6px);
+}
+
+.page-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+
+/* ---------------- 骨架屏呼吸 ---------------- */
+.el-skeleton__item {
+  background: linear-gradient(90deg, var(--ink-100) 25%, var(--ink-50) 37%, var(--ink-100) 63%);
+  background-size: 400% 100%;
+}
+
+/* ---------------- markdown（Agent 回复） ---------------- */
+.md {
+  font-size: 14px;
+  line-height: 1.7;
+  word-break: break-word;
+}
+
+.md > :first-child {
+  margin-top: 0;
+}
+
+.md > :last-child {
+  margin-bottom: 0;
+}
+
+.md h1, .md h2, .md h3, .md h4 {
+  margin: 14px 0 8px;
+  font-size: 15px;
+}
+
+.md p {
+  margin: 8px 0;
+}
+
+.md ul, .md ol {
+  margin: 8px 0;
+  padding-left: 22px;
+}
+
+.md li {
+  margin: 3px 0;
+}
+
+.md code {
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--ink-100);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--brand-700);
+}
+
+.md pre {
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  background: var(--ink-900);
+  overflow: auto;
+}
+
+.md pre code {
+  padding: 0;
+  background: transparent;
+  color: var(--ink-50);
+}
+
+.md table {
+  border-collapse: collapse;
+  margin: 10px 0;
+  font-size: 13px;
+}
+
+.md th, .md td {
+  border: 1px solid var(--ink-200);
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.md th {
+  background: var(--ink-50);
+  font-weight: 600;
+}
+
+.md blockquote {
+  margin: 8px 0;
+  padding: 4px 12px;
+  border-left: 3px solid var(--brand-300);
+  background: var(--brand-50);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  color: var(--ink-600);
+}

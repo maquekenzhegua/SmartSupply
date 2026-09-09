@@ -1,16 +1,22 @@
 <template>
-  <div>
-    <el-card>
-      <template #header>
-        <div style="display: flex; justify-content: space-between; align-items: center">
-          <span>商品管理</span>
-          <el-button type="primary" @click="openDialog()">新增商品</el-button>
-        </div>
-      </template>
-      <el-form inline @submit.prevent>
-        <el-form-item><el-input v-model="keyword" placeholder="商品名搜索" clearable @keyup.enter="load" /></el-form-item>
-        <el-form-item><el-button @click="load">搜索</el-button></el-form-item>
-      </el-form>
+  <div class="page">
+    <div class="page-header">
+      <div class="titles">
+        <h1 class="page-title">商品管理</h1>
+        <p class="page-desc">商品主数据：名称、分类、单位与条码</p>
+      </div>
+      <div class="actions">
+        <el-button type="primary" :icon="Plus" @click="openDialog()">新增商品</el-button>
+      </div>
+    </div>
+
+    <el-card class="list-card" shadow="never">
+      <div class="toolbar">
+        <el-input v-model="keyword" placeholder="商品名搜索" clearable style="width: 240px" @keyup.enter="load">
+          <template #prefix><el-icon><Search /></el-icon></template>
+        </el-input>
+        <el-button @click="load">搜索</el-button>
+      </div>
       <el-table v-loading="loading" :data="rows">
         <el-table-column prop="name" label="商品" min-width="160" />
         <el-table-column prop="category" label="分类" width="100" />
@@ -20,11 +26,11 @@
         <el-table-column label="操作" width="160">
           <template #default="{ row }">
             <el-button size="small" @click="openDialog(row)">编辑</el-button>
-            <el-button size="small" type="danger" @click="remove(row)">删除</el-button>
+            <el-button size="small" type="danger" plain @click="remove(row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
-      <el-pagination v-model:current-page="page" style="margin-top: 12px; justify-content: flex-end" :page-size="size" :total="total" layout="prev, pager, next" @current-change="load" />
+      <el-pagination v-model:current-page="page" class="pager" :page-size="size" :total="total" layout="prev, pager, next" @current-change="load" />
     </el-card>
 
     <el-dialog v-model="dialogVisible" :title="form.id ? '编辑商品' : '新增商品'" width="480px">
@@ -43,6 +49,7 @@
 import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '@/api'
+import { Plus } from '@element-plus/icons-vue'
 const rows = ref<Record<string, unknown>[]>([])
 const loading = ref(false)
 const page = ref(1), size = ref(10), total = ref(0), keyword = ref('')

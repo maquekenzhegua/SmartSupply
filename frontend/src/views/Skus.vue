@@ -1,15 +1,22 @@
 <template>
-  <div>
-    <el-card>
-      <template #header>
-        <div style="display: flex; justify-content: space-between; align-items: center">
-          <span>SKU 管理</span><el-button type="primary" @click="openDialog()">新增SKU</el-button>
-        </div>
-      </template>
-      <el-form inline>
-        <el-form-item><el-input v-model="keyword" placeholder="SKU编码" clearable /></el-form-item>
-        <el-form-item><el-button @click="load">搜索</el-button></el-form-item>
-      </el-form>
+  <div class="page">
+    <div class="page-header">
+      <div class="titles">
+        <h1 class="page-title">SKU 管理</h1>
+        <p class="page-desc">SKU 编码、规格与成本/售价维护</p>
+      </div>
+      <div class="actions">
+        <el-button type="primary" :icon="Plus" @click="openDialog()">新增SKU</el-button>
+      </div>
+    </div>
+
+    <el-card class="list-card" shadow="never">
+      <div class="toolbar">
+        <el-input v-model="keyword" placeholder="SKU编码" clearable style="width: 240px">
+          <template #prefix><el-icon><Search /></el-icon></template>
+        </el-input>
+        <el-button @click="load">搜索</el-button>
+      </div>
       <el-table v-loading="loading" :data="rows">
         <el-table-column prop="sku_code" label="SKU编码" width="170" />
         <el-table-column prop="product_name" label="商品" width="140" />
@@ -17,10 +24,10 @@
         <el-table-column prop="cost_price" label="成本价" width="100" />
         <el-table-column prop="sale_price" label="售价" width="100" />
         <el-table-column label="操作" width="160">
-          <template #default="{ row }"><el-button size="small" @click="openDialog(row)">编辑</el-button><el-button size="small" type="danger" @click="remove(row)">删除</el-button></template>
+          <template #default="{ row }"><el-button size="small" @click="openDialog(row)">编辑</el-button><el-button size="small" type="danger" plain @click="remove(row)">删除</el-button></template>
         </el-table-column>
       </el-table>
-      <el-pagination v-model:current-page="page" style="margin-top: 12px; justify-content: flex-end" :page-size="size" :total="total" layout="prev, pager, next" @current-change="load" />
+      <el-pagination v-model:current-page="page" class="pager" :page-size="size" :total="total" layout="prev, pager, next" @current-change="load" />
     </el-card>
     <el-dialog v-model="visible" :title="form.id ? '编辑SKU' : '新增SKU'" width="500px">
       <el-form label-width="90px">
@@ -39,6 +46,7 @@
 import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '@/api'
+import { Plus } from '@element-plus/icons-vue'
 const rows = ref<Record<string, unknown>[]>([]), loading = ref(false)
 const page = ref(1), size = ref(10), total = ref(0), keyword = ref('')
 const visible = ref(false)
