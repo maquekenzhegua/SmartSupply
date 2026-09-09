@@ -28,6 +28,8 @@ Thumbs.db
 docs/eval-report-real-*.md
 # 完整真实评测报告含模型原始输出，不入库；脱敏汇总版（仅聚合指标+数值表）放行提交
 !docs/eval-report-real-summary.md
+# bigram 口径（CI real-eval 的实际召回配置）的脱敏汇总基线，供 compare_eval 时序对比
+!docs/eval-report-real-bigram-summary.md
 # CI eval 运行产物（llm_judge.py 相对路径以 agent-python/ 为根解析）
 agent-python/docs/
 

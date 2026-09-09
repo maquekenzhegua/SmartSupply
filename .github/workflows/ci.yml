@@ -231,7 +231,8 @@ jobs:
 
   real-eval:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 60 题 × 图路径作答 + judge 逐题评：本地实跑约 35 分钟/口径，30 分钟会超时
+    timeout-minutes: 90
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_real_eval }}
     steps:
       - uses: actions/checkout@v4
@@ -254,8 +255,9 @@ jobs:
           python scripts/llm_judge.py --mode real --recall bigram --out docs/eval-report-real-ci.md
           # llm_judge 内部已默认 faith>=1.2 门禁；此处为报告解析层的双保险
           python scripts/check_gate.py docs/eval-report-real-ci.md --min-hit 0.6 --min-faithfulness 1.2
-          # 回归对比：与入库的脱敏汇总基线比，相对跌幅>10% 即 FAIL（快照 API 在 CI 无后端不可达）
-          python scripts/compare_eval.py --report docs/eval-report-real-ci.md --baseline-report ../docs/eval-report-real-summary.md
+          # 回归对比：与入库的同口径（bigram）脱敏汇总基线比，相对跌幅>10% 即 FAIL
+          # （此前错配成 vector 基线：bigram 口径命中天然低于 vector，会假阳性 FAIL）
+          python scripts/compare_eval.py --report docs/eval-report-real-ci.md --baseline-report ../docs/eval-report-real-bigram-summary.md
           # trajectory（真实模型）：信息性收集（真实模型规划可合理偏离 golden 关键词口径，暂不设门禁）
           python scripts/eval_trajectory.py --mode real --out docs/eval-trajectory-real-ci.md
       - uses: actions/upload-artifact@v4
