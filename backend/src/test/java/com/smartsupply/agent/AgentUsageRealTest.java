@@ -34,7 +34,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
   "spring.flyway.enabled=false",
   "spring.sql.init.mode=never",
   "spring.data.redis.host=localhost", "spring.data.redis.port=6379",
-  "spring.ai.openai.api-key=${OPENAI_API_KEY:}",
+  // api-key 占位必须有非空兜底：类级 @Sql/@DirtiesContext 会先于方法级 EVAL_REAL_LLM
+  // 门禁触发 Spring 上下文创建，无 env 时 Spring AI 因空 key 拒绝建上下文
+  "spring.ai.openai.api-key=${OPENAI_API_KEY:dummy-real-gated-context}",
   "spring.ai.openai.base-url=${OPENAI_BASE_URL:https://api.openai.com}",
   "spring.ai.openai.chat.options.model=${AI_MODEL:gpt-4o-mini}",
   "smartsupply.ai.mock=false",
