@@ -61,6 +61,7 @@ class PostgresRegressionTest {
     @Autowired ObjectMapper om;
     @Autowired JdbcTemplate jdbc;
     @Autowired org.springframework.data.redis.core.StringRedisTemplate stringRedis;
+    @Autowired com.smartsupply.agent.memory.ChatMemoryService memory;
 
     @org.junit.jupiter.api.BeforeEach
     void flushPurchaseIdempotencyKeys() {
@@ -168,6 +169,22 @@ class PostgresRegressionTest {
         Integer flows = jdbc.queryForObject(
                 "SELECT count(*) FROM inventory_flow WHERE reason LIKE '采购入库 %'", Integer.class);
         assertThat(flows).isGreaterThanOrEqualTo(1);
+    }
+
+    @Test
+    void chatToolCallsJsonPersistsOnRealPg() {
+        // 实跑事故回归：tool_calls_json 在 PG 是 JSONB 列，字符串参数不 CAST 必报
+        // 42804（H2 TEXT 列全绿掩盖）；写入走生产路径 ChatMemoryService.persistAssistantToolCalls
+        jdbc.update("INSERT INTO chat_session(agent_type, title, session_key, user_id) VALUES " +
+                "('general','jsonb-regression','jsonb-regression-key',1)");
+        Long sid = jdbc.queryForObject(
+                "SELECT id FROM chat_session WHERE session_key='jsonb-regression-key'", Long.class);
+        jdbc.update("INSERT INTO chat_message(session_id, role, content) VALUES (?, 'assistant', '上一轮回复')", sid);
+        memory.persistAssistantToolCalls(sid, "[\"list_low_stock\"]");
+        String persisted = jdbc.queryForObject(
+                "SELECT tool_calls_json::text FROM chat_message WHERE session_id=? AND role='assistant'",
+                String.class, sid);
+        assertThat(persisted).contains("list_low_stock");
     }
 
     @Test

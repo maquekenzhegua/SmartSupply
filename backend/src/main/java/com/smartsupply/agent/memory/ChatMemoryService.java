@@ -290,6 +290,26 @@ public class ChatMemoryService {
         }
     }
 
+    /**
+     * 把最近一轮的工具调用清单挂到该会话最近一条 assistant 消息上（chat_message.tool_calls_json）。
+     * 调用方（AgentController）保证：调用前刚完成 assistant 消息 append，子查询命中的就是新行。
+     * 写入方言：tool_calls_json 在 PG 是 JSONB 列，字符串参数必须显式 CAST 才能写入
+     * （真 PG 报 42804 → BadSqlGrammarException，H2 TEXT 列不识别 jsonb 类型名）；
+     * 口径与 ObservationService.insertToolCall 的 args_json 一致（4fff26a 台账方言修复）。
+     */
+    public void persistAssistantToolCalls(Long sessionDbId, String toolCallsJson) {
+        try {
+            jdbc.update("UPDATE chat_message SET tool_calls_json=CAST(? AS jsonb) WHERE id=" +
+                    "(SELECT id FROM chat_message WHERE session_id=? AND role='assistant' ORDER BY id DESC LIMIT 1)",
+                    toolCallsJson, sessionDbId);
+        } catch (org.springframework.jdbc.BadSqlGrammarException castUnsupported) {
+            // H2（测试/demo，tool_calls_json=TEXT）不识别 jsonb 类型名 → 回退裸参数直插
+            jdbc.update("UPDATE chat_message SET tool_calls_json=? WHERE id=" +
+                    "(SELECT id FROM chat_message WHERE session_id=? AND role='assistant' ORDER BY id DESC LIMIT 1)",
+                    toolCallsJson, sessionDbId);
+        }
+    }
+
     /** 会话归属者用户名；user_id 为空（存量会话）或查不到用户时返回 null */
     public String sessionOwner(String sessionId) {
         try {

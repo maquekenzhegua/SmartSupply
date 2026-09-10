@@ -242,16 +242,13 @@ public class AgentController {
         }
         reply = enforceCitation(reply, ragContext, citationTitles(detail), citationFlags);
         memory.append(sessionId, "user", message, user);
-        // persist tool calls json
+        // persist tool calls json（写入本体在 ChatMemoryService：jsonb CAST 方言处理在那一层）
         try {
             if (!usedTools.isEmpty()) {
                 Long sid = memory.findSessionDbId(sessionId);
                 if (sid != null) {
                     String toolJson = new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(usedTools);
-                    // UPDATE ... ORDER BY ... LIMIT 是 MySQL 方言，H2(PG模式)/PG 会报语法错。
-                    // 用关联子查询取最近一条 assistant 消息，三种数据库通用。
-                    jdbc.update("UPDATE chat_message SET tool_calls_json=? WHERE id="
-                            + "(SELECT id FROM chat_message WHERE session_id=? AND role='assistant' ORDER BY id DESC LIMIT 1)", toolJson, sid);
+                    memory.persistAssistantToolCalls(sid, toolJson);
                 }
             }
         } catch (Exception e) {
