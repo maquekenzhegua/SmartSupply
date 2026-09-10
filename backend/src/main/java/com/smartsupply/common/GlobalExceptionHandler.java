@@ -58,6 +58,14 @@ public class GlobalExceptionHandler {
         return Result.fail(403, "无权限");
     }
 
+    // 未知路径（无 handler 命中/静态资源未找到）应答 404——Spring 6.1 起未命中统一抛
+    // NoResourceFoundException，此前落入兜底 500 并打 ERROR 堆栈，监控误报且语义错误
+    @ExceptionHandler(org.springframework.web.servlet.resource.NoResourceFoundException.class)
+    @ResponseStatus(HttpStatus.NOT_FOUND)
+    public Result<Void> notFound(org.springframework.web.servlet.resource.NoResourceFoundException e) {
+        return Result.fail(404, "接口不存在");
+    }
+
     @ExceptionHandler(Exception.class)
     @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
     public Result<Void> internal(Exception e) {
