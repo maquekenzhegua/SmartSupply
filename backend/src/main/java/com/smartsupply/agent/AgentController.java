@@ -233,10 +233,15 @@ public class AgentController {
         List<String> usedTools;
         long llmStart = System.currentTimeMillis();
         Map<String, Object> citationFlags = new java.util.HashMap<>();
+        final org.springframework.ai.chat.model.ChatResponse chatMeta;
         try {
-            reply = spec.user(userContent)
+            // CallResponseSpec 单次消费（content()/chatResponse() 双读会 IllegalStateException）：
+            // 统一走 chatResponse() 一次，文本从 result 派生，元数据留作 usage 回填
+            chatMeta = spec.user(userContent)
                     .tools(inventoryTools, purchaseTools, contractTools, catalogTools)
-                    .call().content();
+                    .call().chatResponse();
+            reply = chatMeta == null || chatMeta.getResult() == null || chatMeta.getResult().getOutput() == null
+                    ? null : chatMeta.getResult().getOutput().getText();
         } finally {
             usedTools = com.smartsupply.agent.tools.ToolSecurity.endToolTrace();
         }
@@ -259,7 +264,10 @@ public class AgentController {
         } catch (Exception e) {
             log.warn("persist tool_calls_json failed (non-fatal): {}", e.toString());
         }
+        // 一次性消费 usage：muse 专属实现走 ThreadLocal；其余模型（mimo 等）从 ChatResponse
+        // 元数据取网关真实 usage；两者皆无（Mock）回退长度估算
         TokenContext.Usage usage = MuseSparkChatModel.consumeUsage();
+        if (usage == null) usage = TokenContext.fromChatMetadata(chatMeta);
         int promptTokens;
         int completionTokens;
         String tokenSource;
