@@ -513,12 +513,49 @@ public class AgentController {
                     if (m.getText() == null || m.getText().equals(systemPrompt)) continue;
                     spec = spec.messages(m);
                 }
+                // 台账 run：与 deep 分支同口径——java-direct 流式此前完全无 run 行，
+                // admin runs 台账、tool_calls 台账、预算入账全部缺失
+                Long streamUid = null;
+                try { streamUid = jdbc.queryForObject("SELECT id FROM sys_user WHERE username=?", Long.class, streamUser); } catch (Exception ignored) {}
+                final long streamRunId = observation.insertRun(capturedTrace == null ? "" : capturedTrace,
+                        streamUser, streamUid, sessionId, agentType, "stream",
+                        chatMock ? "mock" : aiModelName, prompts.versionFor(agentType));
                 StringBuilder acc = new StringBuilder();
                 AtomicBoolean firstToken = new AtomicBoolean(true);
                 AtomicLong ttfbMs = new AtomicLong(-1);
                 // 工具追踪（跨线程可靠）：共享列表经 ToolContext 注入 @Tool 方法，
                 // 执行线程（reactor）与订阅线程（sseExecutor）分离也能完整回收
                 final List<String> streamToolTrace = java.util.Collections.synchronizedList(new ArrayList<>());
+                // 断连/超时兜底：客户端中途断开时 subscribe 的 onComplete 不再执行，
+                // user + 已生成部分回复双丢（下一轮上下文断）；onError/onTimeout/onCompletion
+                // 首个触发的兜底落库，正常完成路径已置 saved 标志故幂等 no-op
+                final java.util.concurrent.atomic.AtomicBoolean ledgerSaved = new java.util.concurrent.atomic.AtomicBoolean(false);
+                final Runnable abortSave = () -> {
+                    if (!ledgerSaved.compareAndSet(false, true)) return;
+                    try {
+                        String partial = enforceCitation(acc.toString(), finalRagContext, citationTitles(finalStreamDetail), null);
+                        memory.append(sessionId, "user", message, streamUser);
+                        if (partial != null && !partial.isBlank()) {
+                            memory.append(sessionId, "assistant", partial, streamUser);
+                        }
+                        long abortMs = System.currentTimeMillis() - streamStart;
+                        int pAbort = tokenEstimator.estimate(systemPrompt + finalUserContent) + estimateHistoryTokens(history);
+                        int cAbort = tokenEstimator.estimate(partial == null ? "" : partial);
+                        observation.recordChat(agentType, "stream-abort", abortMs, pAbort, cAbort,
+                                tokenEstimator.estimateCostUsd(pAbort, cAbort),
+                                capturedTrace == null ? "stream" : capturedTrace, "estimated");
+                        if (finalStreamDetail != null) observation.recordRag(finalStreamDetail.latencyMs(), finalStreamDetail.reranked());
+                        if (streamRunId > 0) {
+                            observation.completeRun(streamRunId, "ABORTED", abortMs,
+                                    ttfbMs.get() > 0 ? ttfbMs.get() : null,
+                                    pAbort, cAbort, 0.0, "estimated", "client aborted");
+                            budget.addCost(streamUser, tokenEstimator.estimateCostUsd(pAbort, cAbort));
+                        }
+                    } catch (Exception ex) { log.debug("stream abort save failed: {}", ex.toString()); }
+                };
+                emitter.onError(e -> abortSave.run());
+                emitter.onTimeout(abortSave::run);
+                emitter.onCompletion(abortSave::run);
                 try {
                     var stream = spec.user(finalUserContent)
                             .tools(inventoryTools, purchaseTools, contractTools, catalogTools)
@@ -541,6 +578,7 @@ public class AgentController {
                             err -> emitter.completeWithError(err),
                             () -> {
                                 try {
+                                    if (!ledgerSaved.compareAndSet(false, true)) return;
                                     String reply = enforceCitation(acc.toString(), finalRagContext, citationTitles(finalStreamDetail), null);
                                     if (reply.isBlank()) {
                                         String fallback = chatClient.prompt().system(systemPrompt)
@@ -554,6 +592,16 @@ public class AgentController {
                                     memory.append(sessionId, "user", message, streamUser);
                                     memory.append(sessionId, "assistant", reply, streamUser);
                                     long totalMs = System.currentTimeMillis() - streamStart;
+                                    // 工具调用清单挂到本轮 assistant 行（与 /chat 同口径）
+                                    List<String> usedTools = List.copyOf(streamToolTrace);
+                                    try {
+                                        if (!usedTools.isEmpty()) {
+                                            Long sid = memory.findSessionDbId(sessionId);
+                                            if (sid != null) {
+                                                memory.persistAssistantToolCalls(sid, new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(usedTools));
+                                            }
+                                        }
+                                    } catch (Exception ex) { log.warn("persist stream tool_calls_json failed (non-fatal): {}", ex.toString()); }
                                     // 一次性消费 usage：此前三个 consumeLast* 分三次消费 ThreadLocal/静态值，
                                     // 并发下会把 A 请求的 token 记到 B 请求头上
                                     TokenContext.Usage usage2 = MuseSparkChatModel.consumeUsage();
@@ -564,11 +612,21 @@ public class AgentController {
                                     String srcFinal = usage2 != null && "actual".equals(usage2.source()) ? "actual" : "estimated";
                                     double cost2 = tokenEstimator.estimateCostUsd(pTokens, cTokens);
                                     observation.recordChat(agentType, "stream", totalMs, pTokens, cTokens, cost2, capturedTrace == null ? "stream" : capturedTrace, srcFinal);
+                                    if (streamRunId > 0) {
+                                        observation.completeRun(streamRunId, "SUCCESS", totalMs, null, pTokens, cTokens, cost2, srcFinal, null);
+                                        observation.insertStep(streamRunId, 1, "llm", "java-direct",
+                                                sha(systemPrompt + finalUserContent), sha(reply), totalMs, true);
+                                        for (String tname : usedTools) {
+                                            observation.insertToolCall(streamRunId, null, tname, "{}", sha(tname), true, 0, firstRole());
+                                        }
+                                        if (finalStreamDetail != null) observation.recordRag(finalStreamDetail.latencyMs(), finalStreamDetail.reranked());
+                                        budget.addCost(streamUser, cost2);   // 预算入账此前在流式路径整体缺失
+                                    }
                                     Map<String, Object> done = new java.util.HashMap<>();
                                     done.put("ttfbMs", ttfbMs.get());
                                     done.put("totalMs", totalMs);
                                     done.put("tokenSource", srcFinal);
-                                    done.put("tools", List.copyOf(streamToolTrace));
+                                    done.put("tools", usedTools);
                                     emitter.send(SseEmitter.event().data(new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(done)).name("done"));
                                     emitter.complete();
                                 } catch (Exception e) { emitter.completeWithError(e); }
@@ -583,7 +641,15 @@ public class AgentController {
                     memory.append(sessionId, "assistant", text, streamUser);
                     sendTokenized(emitter, text, 64);
                     long totalMs = System.currentTimeMillis() - streamStart;
-                    observation.recordChat(agentType, "stream-fallback", totalMs, tokenEstimator.estimate(systemPrompt + finalUserContent), tokenEstimator.estimate(text), tokenEstimator.estimateCostUsd(tokenEstimator.estimate(text), tokenEstimator.estimate(text)), capturedTrace == null ? "stream" : capturedTrace, "estimated");
+                    int pFb = tokenEstimator.estimate(systemPrompt + finalUserContent);
+                    int cFb = tokenEstimator.estimate(text);
+                    double costFb = tokenEstimator.estimateCostUsd(pFb, cFb);
+                    observation.recordChat(agentType, "stream-fallback", totalMs, pFb, cFb, costFb, capturedTrace == null ? "stream" : capturedTrace, "estimated");
+                    if (streamRunId > 0) {
+                        observation.completeRun(streamRunId, "SUCCESS", totalMs, null, pFb, cFb, costFb, "estimated", null);
+                        budget.addCost(streamUser, costFb);
+                        if (finalStreamDetail != null) observation.recordRag(finalStreamDetail.latencyMs(), finalStreamDetail.reranked());
+                    }
                     emitter.send(SseEmitter.event().data("[DONE]").name("done"));
                     emitter.complete();
                 }
