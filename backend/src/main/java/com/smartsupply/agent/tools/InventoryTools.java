@@ -25,11 +25,12 @@ public class InventoryTools {
 
     @Tool(description = "查询指定 SKU 的库存与安全库存，返回 quantity / safety_stock / 是否低于安全库存")
     public Map<String, Object> getInventory(
-            @ToolParam(description = "SKU编码，如 SKU-T001-WH-M") String skuCode) {
+            @ToolParam(description = "SKU编码，如 SKU-T001-WH-M") String skuCode,
+            org.springframework.ai.chat.model.ToolContext toolContext) {
         long start = System.currentTimeMillis();
         boolean ok = false;
         try {
-            security.requireRead("getInventory");
+            security.requireRead("getInventory", toolContext);
             if (skuCode == null || skuCode.isBlank()) throw new IllegalArgumentException("skuCode 不能为空");
             String code = skuCode.trim().toUpperCase();
             if (!SKU_PATTERN.matcher(code).matches()) throw new IllegalArgumentException("SKU 格式不合法");
@@ -51,9 +52,9 @@ public class InventoryTools {
     }
 
     @Tool(description = "查询所有低于安全库存的 SKU 列表，按缺口降序")
-    public List<Map<String, Object>> listLowStock() {
+    public List<Map<String, Object>> listLowStock(org.springframework.ai.chat.model.ToolContext toolContext) {
         long start = System.currentTimeMillis();
-        security.requireRead("listLowStock");
+        security.requireRead("listLowStock", toolContext);
         try {
             List<Map<String, Object>> rows = jdbc.queryForList("""
                     SELECT s.sku_code, s.spec, w.name as warehouse, i.quantity, i.safety_stock

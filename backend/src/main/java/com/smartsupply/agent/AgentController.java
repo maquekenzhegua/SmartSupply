@@ -228,22 +228,25 @@ public class AgentController {
             if (m.getText() == null || m.getText().equals(systemPrompt)) continue;
             spec = spec.messages(m);
         }
-        com.smartsupply.agent.tools.ToolSecurity.beginToolTrace();
         String reply;
         List<String> usedTools;
         long llmStart = System.currentTimeMillis();
         Map<String, Object> citationFlags = new java.util.HashMap<>();
+        // 工具追踪（跨线程可靠）：ToolContext 注入共享列表，@Tool 方法在任意执行线程把
+        // 记录写进同一列表（替代 ThreadLocal——同步路径等价，流式路径从必丢变为可靠）
+        final List<String> toolTrace = new java.util.ArrayList<>();
         final org.springframework.ai.chat.model.ChatResponse chatMeta;
         try {
             // CallResponseSpec 单次消费（content()/chatResponse() 双读会 IllegalStateException）：
             // 统一走 chatResponse() 一次，文本从 result 派生，元数据留作 usage 回填
             chatMeta = spec.user(userContent)
                     .tools(inventoryTools, purchaseTools, contractTools, catalogTools)
+                    .toolContext(Map.of("toolTrace", toolTrace))
                     .call().chatResponse();
             reply = chatMeta == null || chatMeta.getResult() == null || chatMeta.getResult().getOutput() == null
                     ? null : chatMeta.getResult().getOutput().getText();
         } finally {
-            usedTools = com.smartsupply.agent.tools.ToolSecurity.endToolTrace();
+            usedTools = List.copyOf(toolTrace);
         }
         reply = enforceCitation(reply, ragContext, citationTitles(detail), citationFlags);
         memory.append(sessionId, "user", message, user);
@@ -513,10 +516,13 @@ public class AgentController {
                 StringBuilder acc = new StringBuilder();
                 AtomicBoolean firstToken = new AtomicBoolean(true);
                 AtomicLong ttfbMs = new AtomicLong(-1);
-                com.smartsupply.agent.tools.ToolSecurity.beginToolTrace();
+                // 工具追踪（跨线程可靠）：共享列表经 ToolContext 注入 @Tool 方法，
+                // 执行线程（reactor）与订阅线程（sseExecutor）分离也能完整回收
+                final List<String> streamToolTrace = java.util.Collections.synchronizedList(new ArrayList<>());
                 try {
                     var stream = spec.user(finalUserContent)
                             .tools(inventoryTools, purchaseTools, contractTools, catalogTools)
+                            .toolContext(Map.of("toolTrace", streamToolTrace))
                             .stream().content();
                     stream.subscribe(
                             chunk -> {
@@ -539,6 +545,7 @@ public class AgentController {
                                     if (reply.isBlank()) {
                                         String fallback = chatClient.prompt().system(systemPrompt)
                                                 .user(finalUserContent).tools(inventoryTools, purchaseTools, contractTools, catalogTools)
+                                                .toolContext(Map.of("toolTrace", streamToolTrace))
                                                 .call().content();
                                         fallback = enforceCitation(fallback == null ? "" : fallback, finalRagContext, citationTitles(finalStreamDetail), null);
                                         reply = fallback;
@@ -561,7 +568,7 @@ public class AgentController {
                                     done.put("ttfbMs", ttfbMs.get());
                                     done.put("totalMs", totalMs);
                                     done.put("tokenSource", srcFinal);
-                                    done.put("tools", com.smartsupply.agent.tools.ToolSecurity.endToolTrace());
+                                    done.put("tools", List.copyOf(streamToolTrace));
                                     emitter.send(SseEmitter.event().data(new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(done)).name("done"));
                                     emitter.complete();
                                 } catch (Exception e) { emitter.completeWithError(e); }
@@ -569,7 +576,8 @@ public class AgentController {
                     );
                     return;
                 } catch (Exception ex) {
-                    String reply = enforceCitation(spec.user(finalUserContent).tools(inventoryTools, purchaseTools, contractTools, catalogTools).call().content(), finalRagContext, citationTitles(finalStreamDetail), null);
+                    String reply = enforceCitation(spec.user(finalUserContent).tools(inventoryTools, purchaseTools, contractTools, catalogTools)
+                            .toolContext(Map.of("toolTrace", streamToolTrace)).call().content(), finalRagContext, citationTitles(finalStreamDetail), null);
                     String text = reply == null ? "" : reply;
                     memory.append(sessionId, "user", message, streamUser);
                     memory.append(sessionId, "assistant", text, streamUser);

@@ -19,9 +19,10 @@ public class CatalogTools {
 
     @Tool(description = "搜索商品与SKU，返回 product_name/sku_code/spec/sale_price，关键词走参数化 ILIKE")
     public List<Map<String, Object>> searchCatalog(
-            @ToolParam(description = "关键词，如 T恤/箱包/白色") String keyword) {
+            @ToolParam(description = "关键词，如 T恤/箱包/白色") String keyword,
+            org.springframework.ai.chat.model.ToolContext toolContext) {
         long start = System.currentTimeMillis();
-        security.requireRead("searchCatalog");
+        security.requireRead("searchCatalog", toolContext);
         try {
             String q = "%" + (keyword == null ? "" : keyword.trim()) + "%";
             List<Map<String, Object>> rows = jdbc.queryForList("""

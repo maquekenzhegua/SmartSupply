@@ -39,7 +39,7 @@ public class AgentPurchaseController {
             String skuCode = String.valueOf(body.get("skuCode"));
             int quantity = Integer.parseInt(String.valueOf(body.get("quantity")));
             double unitPrice = Double.parseDouble(String.valueOf(body.get("unitPrice")));
-            return org.springframework.http.ResponseEntity.ok(Result.ok(purchaseTools.createPurchaseOrder(supplierId, skuCode, quantity, unitPrice)));
+            return org.springframework.http.ResponseEntity.ok(Result.ok(purchaseTools.createPurchaseOrder(supplierId, skuCode, quantity, unitPrice, null)));
         } catch (SecurityException e) {
             return org.springframework.http.ResponseEntity.status(org.springframework.http.HttpStatus.FORBIDDEN)
                     .body(Result.fail(403, e.getMessage() == null ? "无写操作权限" : e.getMessage()));

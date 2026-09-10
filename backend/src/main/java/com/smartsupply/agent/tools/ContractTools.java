@@ -19,9 +19,10 @@ public class ContractTools {
 
     @Tool(description = "按关键词搜索合同，返回 id/title/status/amount，关键词走参数化 ILIKE")
     public List<Map<String, Object>> searchContracts(
-            @ToolParam(description = "关键词，如 服装/采购/2026") String keyword) {
+            @ToolParam(description = "关键词，如 服装/采购/2026") String keyword,
+            org.springframework.ai.chat.model.ToolContext toolContext) {
         long start = System.currentTimeMillis();
-        security.requireRead("searchContracts");
+        security.requireRead("searchContracts", toolContext);
         try {
             String q = "%" + (keyword == null ? "" : keyword.trim()) + "%";
             List<Map<String, Object>> rows = jdbc.queryForList("SELECT id, title, status, amount FROM contract WHERE title ILIKE ? ORDER BY id DESC LIMIT 10", q);
@@ -35,11 +36,12 @@ public class ContractTools {
 
     @Tool(description = "查询某合同的风险报告，只读")
     public Map<String, Object> getContractRisk(
-            @ToolParam(description = "合同ID") Long contractId) {
+            @ToolParam(description = "合同ID") Long contractId,
+            org.springframework.ai.chat.model.ToolContext toolContext) {
         long start = System.currentTimeMillis();
         boolean ok = false;
         try {
-            security.requireRead("getContractRisk");
+            security.requireRead("getContractRisk", toolContext);
             if (contractId == null || contractId <= 0) throw new IllegalArgumentException("contractId 不合法");
             List<Map<String, Object>> rows = jdbc.queryForList(
                     "SELECT risk_level, summary, suggestion FROM contract_risk_report WHERE contract_id=? ORDER BY id DESC LIMIT 1", contractId);

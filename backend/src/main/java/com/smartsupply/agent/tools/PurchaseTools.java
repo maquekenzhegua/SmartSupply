@@ -36,12 +36,13 @@ public class PurchaseTools {
             @ToolParam(description = "供应商ID") Long supplierId,
             @ToolParam(description = "SKU编码") String skuCode,
             @ToolParam(description = "采购数量") int quantity,
-            @ToolParam(description = "单价") double unitPrice) {
+            @ToolParam(description = "单价") double unitPrice,
+            org.springframework.ai.chat.model.ToolContext toolContext) {
         long start = System.currentTimeMillis();
         boolean ok = false;
         String idemKey = null;
         try {
-            security.requireSupplierWritePerm("createPurchaseOrder");
+            security.requireSupplierWritePerm("createPurchaseOrder", toolContext);
             if (supplierId == null || skuCode == null || skuCode.isBlank()) throw new IllegalArgumentException("supplierId 与 skuCode 不能为空");
             if (quantity <= 0 || quantity > 100000) throw new IllegalArgumentException("数量需在 1..100000");
             if (unitPrice < 0 || unitPrice > 1000000) throw new IllegalArgumentException("单价不合法");
@@ -79,9 +80,9 @@ public class PurchaseTools {
     }
 
     @Tool(description = "查询供应商列表，按评分降序，用于选供应商")
-    public java.util.List<Map<String, Object>> listSuppliers() {
+    public java.util.List<Map<String, Object>> listSuppliers(org.springframework.ai.chat.model.ToolContext toolContext) {
         long start = System.currentTimeMillis();
-        security.requireRead("listSuppliers");
+        security.requireRead("listSuppliers", toolContext);
         try {
             List<Map<String, Object>> rows = jdbc.queryForList("SELECT id, name, rating, status FROM supplier ORDER BY rating DESC");
             observation.recordTool("listSuppliers", true, System.currentTimeMillis() - start);
