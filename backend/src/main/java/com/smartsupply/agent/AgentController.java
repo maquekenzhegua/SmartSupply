@@ -242,6 +242,11 @@ public class AgentController {
         }
         reply = enforceCitation(reply, ragContext, citationTitles(detail), citationFlags);
         memory.append(sessionId, "user", message, user);
+        // assistant 回复同样落记忆与台账：deep（下方 deep 分支）与 stream（onComplete 双 append）
+        // 两路都有，唯独 java-direct 主路径此前缺失——下一轮上下文看不到上一轮回答，
+        // 且 tool_calls_json 的"最近一条 assistant"子查询会错挂到上一轮旧行。
+        // 必须先于 persistAssistantToolCalls（子查询按 id DESC 命中新插入的 assistant 行）。
+        memory.append(sessionId, "assistant", reply, user);
         // persist tool calls json（写入本体在 ChatMemoryService：jsonb CAST 方言处理在那一层）
         try {
             if (!usedTools.isEmpty()) {
