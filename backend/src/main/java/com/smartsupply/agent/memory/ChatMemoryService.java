@@ -40,11 +40,14 @@ public class ChatMemoryService {
     private static final long TTL_SECONDS = 7 * 24 * 3600;
 
     /** 原子裁剪脚本：返回被裁掉的旧消息（供摘要压缩），LTRIM 与读取在 Lua 内原子完成。
-     *  此前"LRANGE 再 LTRIM"两步分离，两个并发请求可能重复压缩/互相覆盖摘要。 */
+     *  此前"LRANGE 再 LTRIM"两步分离，两个并发请求可能重复压缩/互相覆盖摘要。
+     *  len<=keep 时必须返回 Lua 空表 `{}` 而非 nil：Lettuce 把 nil multi-bulk 反序列化成
+     *  size=1 的 [null] 列表，`!old.isEmpty()` 判真后压缩链路会把 null 当消息解析 NPE
+     *  （每次 append 必触发）；空表 → RESP 空 multi-bulk → Java 空列表，语义即"无可裁剪"。 */
     private static final DefaultRedisScript<List> TRIM_OLD_SCRIPT = new DefaultRedisScript<>(
             "local len = redis.call('LLEN', KEYS[1]) " +
             "local keep = tonumber(ARGV[1]) " +
-            "if len <= keep then return nil end " +
+            "if len <= keep then return {} end " +
             "local old = redis.call('LRANGE', KEYS[1], 0, len - keep - 1) " +
             "redis.call('LTRIM', KEYS[1], len - keep, -1) " +
             "redis.call('EXPIRE', KEYS[1], ARGV[2]) " +
@@ -228,13 +231,18 @@ public class ChatMemoryService {
             if (old != null && !old.isEmpty()) {
                 List<Map<String, String>> olds = new ArrayList<>();
                 for (Object o : old) {
-                    olds.add(om.readValue(String.valueOf(o), new TypeReference<Map<String, String>>() {}));
+                    // 防御已入库的损坏条目（如字面量 "null" 字符串）：解析为 null 的条目跳过，
+                    // 不让它打断压缩链路——此场景 LTRIM 已发生，中断意味着被裁消息丢且无摘要
+                    Map<String, String> parsed = om.readValue(String.valueOf(o), new TypeReference<Map<String, String>>() {});
+                    if (parsed != null) olds.add(parsed);
                 }
-                String prev = null;
-                try { prev = redis.opsForValue().get(summaryKey(sessionId)); } catch (Exception ignored) {}
-                String compressed = compress(olds, prev);
-                try { redis.opsForValue().set(summaryKey(sessionId), compressed, 7, TimeUnit.DAYS); } catch (Exception ignored) {}
-                persistSummary(sessionId, compressed);  // 摘要双写：Redis 丢失/重启后可从 chat_session.summary 恢复
+                if (!olds.isEmpty()) {
+                    String prev = null;
+                    try { prev = redis.opsForValue().get(summaryKey(sessionId)); } catch (Exception ignored) {}
+                    String compressed = compress(olds, prev);
+                    try { redis.opsForValue().set(summaryKey(sessionId), compressed, 7, TimeUnit.DAYS); } catch (Exception ignored) {}
+                    persistSummary(sessionId, compressed);  // 摘要双写：Redis 丢失/重启后可从 chat_session.summary 恢复
+                }
             }
         } catch (Exception e) {
             // 旧版单字符串格式（WRONGTYPE）迁移：从 DB 重建 List 后重试一次 append
@@ -320,7 +328,10 @@ public class ChatMemoryService {
             try {
                 StringBuilder prompt = new StringBuilder("将以下对话压缩为150字内摘要，保留关键事实：\n");
                 if (prevSummary != null && !prevSummary.isBlank()) prompt.append("已有摘要: ").append(prevSummary).append("\n");
-                for (Map<String,String> m : old) prompt.append(m.get("role")).append(": ").append(m.get("content")).append("\n");
+                for (Map<String,String> m : old) {
+                    if (m == null) continue;  // 防御损坏条目（防御口径同 append 解析层）
+                    prompt.append(m.get("role")).append(": ").append(m.get("content")).append("\n");
+                }
                 String summary = chatClient.prompt().user(prompt.toString()).call().content();
                 if (summary != null && !summary.isBlank()) {
                     String s = summary.trim();
@@ -332,9 +343,11 @@ public class ChatMemoryService {
         if (prevSummary != null && !prevSummary.isBlank()) sb.append(prevSummary).append(" | ");
         int cap = Math.min(old.size(), 10);
         for (int i = 0; i < cap; i++) {
-            String c = old.get(i).get("content");
+            Map<String, String> m = old.get(i);
+            if (m == null) continue;  // 防御损坏条目（防御口径同 append 解析层）
+            String c = m.get("content");
             if (c != null && c.length() > 80) c = c.substring(0, 80) + "...";
-            sb.append(old.get(i).get("role")).append(":").append(c).append("; ");
+            sb.append(m.get("role")).append(":").append(c).append("; ");
         }
         String s = sb.toString();
         return s.length() > 800 ? s.substring(0, 800) : s;

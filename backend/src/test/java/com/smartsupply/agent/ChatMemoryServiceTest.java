@@ -7,10 +7,12 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.jdbc.Sql;
 
+import java.lang.reflect.Field;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
@@ -96,5 +98,54 @@ class ChatMemoryServiceTest {
         assertEquals("admin", owner, "新会话应在创建时即归属首个写入者");
         assertTrue(memory.canAccess(SID, "admin"));
         assertFalse(memory.canAccess(SID, "ops"), "非归属者不得访问他人会话");
+    }
+
+    /** 锁 Lua 裁剪脚本契约：len<=keep（无可裁剪）必须返回空列表——
+     *  旧实现 `return nil` 被 Lettuce 反序列化成 size=1 的 [null]，
+     *  驱动 append 里的压缩块对非法条目 NPE（每次 append 必触发）。 */
+    @Test
+    @SuppressWarnings("unchecked")
+    void trimScriptReturnsEmptyListWhenUnderWindow() throws Exception {
+        String t1 = SID + "-t1";
+        String k = "agent:memory:" + t1;
+        redis.delete(k);
+        for (int i = 0; i < 5; i++) redis.opsForList().rightPush(k, "{\"role\":\"user\",\"content\":\"m" + i + "\"}");
+        try {
+            Field f = ChatMemoryService.class.getDeclaredField("TRIM_OLD_SCRIPT");
+            f.setAccessible(true);
+            DefaultRedisScript<List> script = (DefaultRedisScript<List>) f.get(null);
+            List<Object> old = redis.execute(script, List.of(k), "40", "604800");
+            assertNotNull(old, "Lua 空表(无可裁剪)应反序列化为列表而非 null");
+            assertTrue(old.isEmpty(),
+                    "len<=WINDOW 时脚本应返回空列表（[null] 会让压缩块把 null 当消息解析），实际 size=" + old.size());
+        } finally {
+            redis.delete(k);
+        }
+    }
+
+    /** 锁损坏条目防御：列表头部混入字面量 "null"（历史脏数据），真裁剪发生时
+     *  压缩链路不得因 null 元素中断——旧实现该场景 LTRIM 已发生但摘要双写被跳过，
+     *  是唯一真实丢摘要的路径（本地实测每次 append 都触发的一对 NPE）。 */
+    @Test
+    void corruptEntryTrimStillWritesSummary() {
+        String sid2 = SID + "-t2";
+        String k = "agent:memory:" + sid2;
+        redis.delete(k);
+        redis.opsForList().rightPush(k, "null");  // 字面量损坏条目（最老位置）
+        for (int i = 0; i < 40; i++) {
+            redis.opsForList().rightPush(k, "{\"role\":\"user\",\"content\":\"m" + i + "\"}");
+        }
+        try {
+            memory.append(sid2, "user", "trigger", "admin");  // len=42>40，真裁剪最老 2 条（含 "null"）
+            Long len = redis.opsForList().size(k);
+            assertNotNull(len);
+            assertTrue(len <= 40, "窗口裁剪后列表不得超过 40 条，实际 " + len);
+            String summary = redis.opsForValue().get("agent:memory:summary:" + sid2);
+            assertNotNull(summary, "裁剪发生时滚动摘要必须写入（不得因损坏条目中断）");
+            assertFalse(summary.isBlank());
+        } finally {
+            redis.delete(k);
+            redis.delete("agent:memory:summary:" + sid2);
+        }
     }
 }
