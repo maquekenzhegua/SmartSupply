@@ -1,5 +1,6 @@
 package com.smartsupply.config;
 
+import jakarta.servlet.DispatcherType;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -17,6 +18,7 @@ import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
 import java.util.Arrays;
 import java.util.List;
+
 
 @Configuration
 @EnableMethodSecurity
@@ -38,6 +40,11 @@ public class SecurityConfig {
             .csrf(AbstractHttpConfigurer::disable)
             .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> auth
+                // ASYNC/ERROR dispatch 放行：Boot 3.5 默认在全部 dispatch 类型上重跑安全链，
+                // 而 JwtAuthFilter(OncePerRequestFilter) 跳过 ASYNC/ERROR，链上此时为匿名态；
+                // SSE(SseEmitter) 完成回环与 /error 错误页渲染若被拒会撞上"响应已提交"。
+                // 首次 REQUEST dispatch 仍完整鉴权，ASYNC/ERROR 只能由容器内部发起，无绕过面。
+                .dispatcherTypeMatchers(DispatcherType.ASYNC, DispatcherType.ERROR).permitAll()
                 // 健康探针公开；指标与 Prometheus 端点仅 ADMIN（否则成本/token 台账可被匿名抓取）。
                 // 例外：/actuator/prometheus 对内放开——prod 拓扑 8080 不对外发布（仅 nginx 80
                 // 代理 /api 与 /），Prometheus 从内部网络抓取；JWT 会过期无法用于常驻抓取凭据。
